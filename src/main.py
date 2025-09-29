@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Robot Arm Viewer (v1.7, Matplotlib + PySide6)
-- 모든 관절 범위: CW -90°, CCW +90°
-- 홈포즈: J2=70°, J3=90°, J4=10°
+Robot Arm Viewer (v2.0, Matplotlib + PySide6)
+- J1 범위: -90° ~ +90°, 홈포즈 0°
+- J2 범위: -90° ~ 0°, 홈포즈 -70°
+- J3 범위: -20° ~ 140°, 홈포즈 120°
+- J4, J5: -90° ~ +90° (기존값 유지)
 - 3D 뷰 회전 상태 유지
+- X축 음수 부분 제거
+- 로봇팔 표시 크기 1.5배 확대
 """
 
 from __future__ import annotations
@@ -44,10 +48,10 @@ class ArmConfig:
     L2: float = 110.0
     L3: float = 60.0
 
-    # 모든 조인트는 -90° ~ +90°
+    # 각 조인트 범위 및 홈포즈
     j1: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90,90,-90,90,0.1,0))
-    j2: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90,90,-90,90,0.1,70))
-    j3: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90,90,-90,90,0.1,90))
+    j2: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90,0,-90,0,0.1,-70))
+    j3: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-20,140,-20,140,0.1,120))
     j4: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90,90,-90,90,0.1,10))
     j5: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90,90,-90,90,0.1,0))
 
@@ -160,7 +164,7 @@ class MainWindow(QMainWindow):
         self.cfg = ArmConfig()
         self.arm = RobotArm(self.cfg)
 
-        self.fig = Figure(figsize=(6, 5))
+        self.fig = Figure(figsize=(7.5, 6.25))  # 기존보다 1.5배 확대
         self.canvas = FigureCanvas(self.fig)
         self.ax = self.fig.add_subplot(111, projection='3d')
         self.toolbar = NavigationToolbar(self.canvas, self)
@@ -241,8 +245,9 @@ class MainWindow(QMainWindow):
         P = np.array(pts)
         self.ax.cla()
 
-        reach = self.cfg.L1 + self.cfg.L2 + self.cfg.L3 + 80
-        self.ax.set_xlim(-reach, reach)
+        # 좌표 범위를 절반으로 줄임 (화면 확대 효과)
+        reach = (self.cfg.L1 + self.cfg.L2 + self.cfg.L3 + 80) * 0.75
+        self.ax.set_xlim(0, reach)   # X축 음수 부분 제거
         self.ax.set_ylim(-reach, reach)
         self.ax.set_zlim(0, reach)
         self.ax.set_xlabel('X (mm)')
@@ -260,7 +265,7 @@ class MainWindow(QMainWindow):
         ee = P[-1]
         self.ee_label.setText(f"EE: X={ee[0]:.1f} mm, Y={ee[1]:.1f} mm, Z={ee[2]:.1f} mm")
 
-        self.ax.plot([-reach, reach], [0, 0], [0, 0], alpha=0.2)
+        self.ax.plot([0, reach], [0, 0], [0, 0], alpha=0.2)
         self.ax.plot([0, 0], [-reach, reach], [0, 0], alpha=0.2)
 
         self.canvas.draw_idle()
