@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Robot Arm Viewer (v1.5, Matplotlib + PySide6)
-- 3D 뷰 회전 상태 유지 안정화
+Robot Arm Viewer (v1.7, Matplotlib + PySide6)
+- 모든 관절 범위: CW -90°, CCW +90°
+- 홈포즈: J2=70°, J3=90°, J4=10°
+- 3D 뷰 회전 상태 유지
 """
 
 from __future__ import annotations
@@ -42,11 +44,12 @@ class ArmConfig:
     L2: float = 110.0
     L3: float = 60.0
 
-    j1: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-150,150,-160,160,0.1,0))
-    j2: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-10,135,-15,140,0.1,30))
-    j3: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-135,135,-140,140,0.1,0))
-    j4: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-135,135,-140,140,0.1,0))
-    j5: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-180,180,-185,185,0.1,0))
+    # 모든 조인트는 -90° ~ +90°
+    j1: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90,90,-90,90,0.1,0))
+    j2: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90,90,-90,90,0.1,70))
+    j3: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90,90,-90,90,0.1,90))
+    j4: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90,90,-90,90,0.1,10))
+    j5: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90,90,-90,90,0.1,0))
 
 class RobotArm:
     def __init__(self, cfg: ArmConfig):
@@ -183,17 +186,13 @@ class MainWindow(QMainWindow):
         main.addLayout(right, 1)
         self.setCentralWidget(center)
 
-        # 초기 뷰 각도 저장 변수
         self._elev = self.ax.elev
         self._azim = self.ax.azim
 
         self._redraw()
-
-        # 마우스로 뷰가 바뀔 때 이벤트 연결
         self.canvas.mpl_connect("motion_notify_event", self._update_view)
 
     def _update_view(self, event):
-        # 뷰 변경이 있으면 현재 각도 저장
         self._elev, self._azim = self.ax.elev, self.ax.azim
 
     def _make_joint_panel(self) -> QGroupBox:
@@ -237,9 +236,7 @@ class MainWindow(QMainWindow):
         self._redraw()
 
     def _redraw(self):
-        # 저장된 뷰 각도 적용
         elev, azim = self._elev, self._azim
-
         pts = self.arm.fk_points()
         P = np.array(pts)
         self.ax.cla()
