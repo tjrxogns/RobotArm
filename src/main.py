@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Robot Arm Viewer (v2.7, Matplotlib + PySide6)
-- J1 범위: -90° ~ +90°, 홈포즈 0°
-- J2 범위: -90° ~ 0°, 홈포즈 -70°
-- J3 범위: -20° ~ 140°, 홈포즈 120°
-- J4, J5: -90° ~ +90° (J4 홈포즈 10°, J5 홈포즈 0°)
-- J5: L3 끝에서 L3와 같은 방향(로컬 X)으로 회전(롤)
-- X축 음수 영역 제거 (0 ~ +X만 표시)
-- 축 범위를 줄여 확대 표시(이전 요청 유지)
-- XY 평면(바닥)에 7인치 스크린(연파랑) 추가: 가로 X=90mm, 세로 Y=155mm, X=60mm부터 시작
-- 3D 뷰 회전 상태 유지 및 축 비율 고정(set_box_aspect)로 왜곡 방지
-- X/Y/Z 단면 보기 버튼
+Robot Arm Viewer (v2.8, Matplotlib + PySide6)
+- 각 관절(J1~J5) 슬라이더에 실제 로봇 서보 각도 표시 추가
+- 시뮬레이터 각도 ↔ 로봇 서보 각도 변환 테이블 포함
 """
 
 from __future__ import annotations
@@ -38,6 +30,9 @@ from matplotlib.figure import Figure
 def deg2rad(d: float) -> float:
     return d * math.pi / 180.0
 
+def sim2robot(sim_angle: float, sim_min: float, sim_max: float, rob_min: float, rob_max: float) -> float:
+    return float(np.interp(sim_angle, [sim_min, sim_max], [rob_min, rob_max]))
+
 # ------------------------------ configs ------------------------------
 
 @dataclass
@@ -63,12 +58,20 @@ class ArmConfig:
     j4: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90, 90, -90, 90, 0.1, 10))
     j5: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90, 90, -90, 90, 0.1, 0))
 
+    # 시뮬레이터 각도 ↔ 로봇 서보 각도 변환 테이블 (예시값, 필요시 수정)
+    servo_map: dict = field(default_factory=lambda: {
+        "J1": (-90, 90, 0, 180),     # sim -90~90 → robot 0~180
+        "J2": (-90, 10, 120, 20),    # sim -90~0 → robot 120~30
+        "J3": ( 0, 140, 30, 170),  # sim -20~140 → robot 40~160
+        "J4": (-90, 90, 0, 180),
+        "J5": (-90, 90, 0, 180),
+    })
+
 # ------------------------------ kinematics ------------------------------
 
 class RobotArm:
     def __init__(self, cfg: ArmConfig):
         self.cfg = cfg
-        # q = [j1, j2, j3, j4, j5] (deg)
         self.q = np.array([cfg.j1.home, cfg.j2.home, cfg.j3.home, cfg.j4.home, cfg.j5.home], dtype=float)
 
     def joint_frames(self, q: np.ndarray | None = None) -> list[np.ndarray]:
@@ -80,43 +83,43 @@ class RobotArm:
 
         Ts: list[np.ndarray] = []
         T = np.eye(4)
-        Ts.append(T.copy())                 # T0 (world)
+        Ts.append(T.copy())
 
         # J1: yaw about Z
         T = T @ np.array([[ math.cos(q1), -math.sin(q1), 0, 0],
                           [ math.sin(q1),  math.cos(q1), 0, 0],
                           [ 0,             0,            1, 0],
                           [ 0,             0,            0, 1]], dtype=float)
-        # base pillar (Z+)
+        # base pillar
         T = T @ np.array([[1,0,0,0],[0,1,0,0],[0,0,1,BH],[0,0,0,1]], dtype=float)
-        Ts.append(T.copy())                 # after pillar
+        Ts.append(T.copy())
 
-        # J2: shoulder pitch about local Y
+        # J2
         T = T @ np.array([[ math.cos(q2), 0, math.sin(q2), 0],
                           [ 0,            1, 0,            0],
                           [-math.sin(q2), 0, math.cos(q2), 0],
-                          [ 0,            0, 0,            1]], dtype=float)
+                          [ 0,            0, 0, 1]], dtype=float)
         Ts.append(T.copy())
 
-        # Link L1 along local X
+        # L1
         T = T @ np.array([[1,0,0,L1],[0,1,0,0],[0,0,1,0],[0,0,0,1]], dtype=float)
         Ts.append(T.copy())
 
-        # J3: mid pitch (local Y)
+        # J3
         T = T @ np.array([[ math.cos(q3), 0, math.sin(q3), 0],
                           [ 0,            1, 0,            0],
                           [-math.sin(q3), 0, math.cos(q3), 0],
-                          [ 0,            0, 0,            1]], dtype=float)
+                          [ 0,            0, 0, 1]], dtype=float)
         Ts.append(T.copy())
 
-        # J4 + L2 (combine: rotate about Y then translate along X by L2)
+        # J4 + L2
         T = T @ np.array([[ math.cos(q4), 0, math.sin(q4), L2],
                           [ 0,            1, 0,             0],
                           [-math.sin(q4), 0, math.cos(q4),  0],
                           [ 0,            0, 0,             1]], dtype=float)
         Ts.append(T.copy())
 
-        # J5: roll about local X at the end of L3; translate along X by L3
+        # J5 roll + L3
         T = T @ np.array([[ 1, 0,            0,           L3],
                           [ 0, math.cos(q5),-math.sin(q5),0 ],
                           [ 0, math.sin(q5), math.cos(q5),0 ],
@@ -141,10 +144,12 @@ class SliderWithBox(QWidget):
         super().__init__(parent)
         self._scale = 100.0
         self.sld = QSlider(Qt.Horizontal)
+        self.sld.setFixedWidth(180) # 슬라이더 폭 고정
         self.sld.setMinimum(int(lo * self._scale))
         self.sld.setMaximum(int(hi * self._scale))
         self.sld.setSingleStep(int(step * self._scale))
         self.sld.setValue(int(init * self._scale))
+
 
         self.box = QDoubleSpinBox()
         self.box.setDecimals(2)
@@ -152,13 +157,20 @@ class SliderWithBox(QWidget):
         self.box.setSingleStep(step)
         self.box.setValue(init)
 
+
         self.lbl = QLabel(unit)
+        self.lbl_robot = QLabel("Robot: 000.0°")
+        self.lbl_robot.setMinimumWidth(80)
+        self.lbl_robot.setAlignment(Qt.AlignRight)
+
 
         lay = QHBoxLayout(self)
         lay.addWidget(self.sld)
         lay.addWidget(self.box)
         lay.addWidget(self.lbl)
+        lay.addWidget(self.lbl_robot)
         lay.setContentsMargins(0,0,0,0)
+
 
         self.sld.valueChanged.connect(self._from_slider)
         self.box.valueChanged.connect(self._from_box)
@@ -193,26 +205,38 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Robot Arm Viewer (Matplotlib)")
         self.resize(1280, 800)
 
+
         self.cfg = ArmConfig()
         self.arm = RobotArm(self.cfg)
 
-        # Bigger figure for clarity
+
         self.fig = Figure(figsize=(7.5, 6.25))
         self.canvas = FigureCanvas(self.fig)
         self.ax = self.fig.add_subplot(111, projection='3d')
         self.toolbar = NavigationToolbar(self.canvas, self)
 
+
         self.joint_group = self._make_controls()
+
 
         self.ee_label = QLabel("")
         self.btn_home = QPushButton("Home pose")
         self.btn_home.clicked.connect(self._go_home)
+
+
+        # 종료 버튼 추가
+        self.btn_exit = QPushButton("Exit")
+        self.btn_exit.setFixedSize(300, 100) # width=300, height=100 pixel
+        self.btn_exit.clicked.connect(QApplication.quit)
+
 
         right = QVBoxLayout()
         right.addWidget(self.joint_group)
         right.addWidget(self.btn_home)
         right.addWidget(self.ee_label)
         right.addStretch(1)
+        right.addWidget(self.btn_exit, alignment=Qt.AlignRight | Qt.AlignBottom)
+
 
         center = QWidget()
         main = QHBoxLayout(center)
@@ -223,14 +247,15 @@ class MainWindow(QMainWindow):
         main.addLayout(right, 1)
         self.setCentralWidget(center)
 
-        # Persisted view
+
         self._elev = self.ax.elev
         self._azim = self.ax.azim
 
-        # Redraw once and connect events
+
         self._redraw()
         self.canvas.mpl_connect("button_release_event", self._update_view)
         self.canvas.mpl_connect("motion_notify_event", self._update_view)
+
     def _go_home(self):
         self.arm.q[:] = [
             self.cfg.j1.home,
@@ -239,18 +264,24 @@ class MainWindow(QMainWindow):
             self.cfg.j4.home,
             self.cfg.j5.home,
         ]
-        # 값 설정 시 신호 폭주 방지
-        self.j1.blockSignals(True); self.j1.setValue(self.arm.q[0]); self.j1.blockSignals(False)
-        self.j2.blockSignals(True); self.j2.setValue(self.arm.q[1]); self.j2.blockSignals(False)
-        self.j3.blockSignals(True); self.j3.setValue(self.arm.q[2]); self.j3.blockSignals(False)
-        self.j4.blockSignals(True); self.j4.setValue(self.arm.q[3]); self.j4.blockSignals(False)
-        self.j5.blockSignals(True); self.j5.setValue(self.arm.q[4]); self.j5.blockSignals(False)
+        for i, w in enumerate([self.j1, self.j2, self.j3, self.j4, self.j5]):
+            w.blockSignals(True)
+            w.setValue(self.arm.q[i])
+            w.blockSignals(False)
+            self._update_robot_angle(i, self.arm.q[i])
         self._redraw()
 
     def _on_joint_change(self, idx: int, val: float):
-        # 슬라이더/스핀박스에서 변경된 값을 관절 벡터에 반영하고 즉시 리드로우
         self.arm.q[idx] = float(val)
+        self._update_robot_angle(idx, val)
         self._redraw()
+
+    def _update_robot_angle(self, idx: int, sim_val: float):
+        name = f"J{idx+1}"
+        if name in self.cfg.servo_map:
+            sim_min, sim_max, rob_min, rob_max = self.cfg.servo_map[name]
+            rob_angle = sim2robot(sim_val, sim_min, sim_max, rob_min, rob_max)
+            [self.j1, self.j2, self.j3, self.j4, self.j5][idx].lbl_robot.setText(f"Robot: {rob_angle:5.1f}°")
 
     # --- controls (sliders + buttons)
     def _make_controls(self) -> QGroupBox:
