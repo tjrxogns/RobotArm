@@ -1,154 +1,43 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Robot Arm Viewer (v2.8, Matplotlib + PySide6)
-- 각 관절(J1~J5) 슬라이더에 실제 로봇 서보 각도 표시 추가
+Robot Arm Viewer (v2.9, Matplotlib + PySide6)
+- 각 관절(J1~J5) 슬라이더에 실제 로봇 서보 각도 표시
 - 시뮬레이터 각도 ↔ 로봇 서보 각도 변환 테이블 포함
+- 3D 뷰에 스크린 위치/사이즈를 UI로 지정하여 연한 하늘색 사각형으로 표시
 """
 
-from __future__ import annotations
-import math
 import sys
-from dataclasses import dataclass, field
-from typing import List
-
+import math
 import numpy as np
-
 from PySide6 import QtCore
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFormLayout,
-    QSlider, QDoubleSpinBox, QLabel, QPushButton, QGroupBox
+    QSlider, QDoubleSpinBox, QLabel, QPushButton, QGroupBox,
+    QGraphicsView, QGraphicsScene, QGraphicsRectItem
 )
-
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 
-# ------------------------------ utils ------------------------------
-
-def deg2rad(d: float) -> float:
-    return d * math.pi / 180.0
-
-def sim2robot(sim_angle: float, sim_min: float, sim_max: float, rob_min: float, rob_max: float) -> float:
-    return float(np.interp(sim_angle, [sim_min, sim_max], [rob_min, rob_max]))
-
-# ------------------------------ configs ------------------------------
-
-@dataclass
-class RevoluteLimit:
-    soft_min: float
-    soft_max: float
-    hard_min: float
-    hard_max: float
-    resolution: float = 0.1
-    home: float = 0.0
-
-@dataclass
-class ArmConfig:
-    BaseHeight: float = 20.0
-    L1: float = 120.0
-    L2: float = 110.0
-    L3: float = 60.0
-
-    # J1: yaw, J2~J4: pitch(Y), J5: roll(X)
-    j1: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90, 90, -90, 90, 0.1, 0))
-    j2: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90, 0, -90, 0, 0.1, -70))
-    j3: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-20, 140, -20, 140, 0.1, 120))
-    j4: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90, 90, -90, 90, 0.1, 10))
-    j5: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90, 90, -90, 90, 0.1, 0))
-
-    # 시뮬레이터 각도 ↔ 로봇 서보 각도 변환 테이블 (예시값, 필요시 수정)
-    servo_map: dict = field(default_factory=lambda: {
-        "J1": (-90, 90, 0, 180),     # sim -90~90 → robot 0~180
-        "J2": (-90, 10, 120, 20),    # sim -90~0 → robot 120~30
-        "J3": ( 0, 140, 30, 170),  # sim -20~140 → robot 40~160
-        "J4": (-90, 90, 0, 180),
-        "J5": (-90, 90, 0, 180),
-    })
-
-# ------------------------------ kinematics ------------------------------
-
-class RobotArm:
-    def __init__(self, cfg: ArmConfig):
-        self.cfg = cfg
-        self.q = np.array([cfg.j1.home, cfg.j2.home, cfg.j3.home, cfg.j4.home, cfg.j5.home], dtype=float)
-
-    def joint_frames(self, q: np.ndarray | None = None) -> list[np.ndarray]:
-        if q is None:
-            q = self.q
-        q1_deg, q2_deg, q3_deg, q4_deg, q5_deg = q
-        q1, q2, q3, q4, q5 = map(deg2rad, (q1_deg, q2_deg, q3_deg, q4_deg, q5_deg))
-        BH, L1, L2, L3 = self.cfg.BaseHeight, self.cfg.L1, self.cfg.L2, self.cfg.L3
-
-        Ts: list[np.ndarray] = []
-        T = np.eye(4)
-        Ts.append(T.copy())
-
-        # J1: yaw about Z
-        T = T @ np.array([[ math.cos(q1), -math.sin(q1), 0, 0],
-                          [ math.sin(q1),  math.cos(q1), 0, 0],
-                          [ 0,             0,            1, 0],
-                          [ 0,             0,            0, 1]], dtype=float)
-        # base pillar
-        T = T @ np.array([[1,0,0,0],[0,1,0,0],[0,0,1,BH],[0,0,0,1]], dtype=float)
-        Ts.append(T.copy())
-
-        # J2
-        T = T @ np.array([[ math.cos(q2), 0, math.sin(q2), 0],
-                          [ 0,            1, 0,            0],
-                          [-math.sin(q2), 0, math.cos(q2), 0],
-                          [ 0,            0, 0, 1]], dtype=float)
-        Ts.append(T.copy())
-
-        # L1
-        T = T @ np.array([[1,0,0,L1],[0,1,0,0],[0,0,1,0],[0,0,0,1]], dtype=float)
-        Ts.append(T.copy())
-
-        # J3
-        T = T @ np.array([[ math.cos(q3), 0, math.sin(q3), 0],
-                          [ 0,            1, 0,            0],
-                          [-math.sin(q3), 0, math.cos(q3), 0],
-                          [ 0,            0, 0, 1]], dtype=float)
-        Ts.append(T.copy())
-
-        # J4 + L2
-        T = T @ np.array([[ math.cos(q4), 0, math.sin(q4), L2],
-                          [ 0,            1, 0,             0],
-                          [-math.sin(q4), 0, math.cos(q4),  0],
-                          [ 0,            0, 0,             1]], dtype=float)
-        Ts.append(T.copy())
-
-        # J5 roll + L3
-        T = T @ np.array([[ 1, 0,            0,           L3],
-                          [ 0, math.cos(q5),-math.sin(q5),0 ],
-                          [ 0, math.sin(q5), math.cos(q5),0 ],
-                          [ 0, 0,            0,           1 ]], dtype=float)
-        Ts.append(T.copy())
-
-        return Ts
-
-    def fk_points(self, q: np.ndarray | None = None) -> List[np.ndarray]:
-        Ts = self.joint_frames(q)
-        return [T[:3,3].copy() for T in Ts]
-
-    def ee(self) -> np.ndarray:
-        return self.fk_points()[-1]
+# ------------------------------ import from robot_arm ------------------------------
+from robot_arm import RobotArm, ArmConfig, sim2robot
 
 # ------------------------------ UI widgets ------------------------------
 
 class SliderWithBox(QWidget):
     valueChanged = QtCore.Signal(float)
+
     def __init__(self, lo: float, hi: float, step: float, init: float, unit: str = "", parent=None):
         super().__init__(parent)
         self._scale = 100.0
         self.sld = QSlider(Qt.Horizontal)
-        self.sld.setFixedWidth(180) # 슬라이더 폭 고정
+        self.sld.setFixedWidth(180)
         self.sld.setMinimum(int(lo * self._scale))
         self.sld.setMaximum(int(hi * self._scale))
         self.sld.setSingleStep(int(step * self._scale))
         self.sld.setValue(int(init * self._scale))
-
 
         self.box = QDoubleSpinBox()
         self.box.setDecimals(2)
@@ -156,12 +45,10 @@ class SliderWithBox(QWidget):
         self.box.setSingleStep(step)
         self.box.setValue(init)
 
-
         self.lbl = QLabel(unit)
         self.lbl_robot = QLabel("Robot: 000.0°")
         self.lbl_robot.setMinimumWidth(80)
         self.lbl_robot.setAlignment(Qt.AlignRight)
-
 
         lay = QHBoxLayout(self)
         lay.addWidget(self.sld)
@@ -169,7 +56,6 @@ class SliderWithBox(QWidget):
         lay.addWidget(self.lbl)
         lay.addWidget(self.lbl_robot)
         lay.setContentsMargins(0,0,0,0)
-
 
         self.sld.valueChanged.connect(self._from_slider)
         self.box.valueChanged.connect(self._from_box)
@@ -196,43 +82,65 @@ class SliderWithBox(QWidget):
     def value(self) -> float:
         return float(self.box.value())
 
+# ------------------------------ Touch Screen widget ------------------------------
+
+class TouchScreen(QGraphicsView):
+    clicked = QtCore.Signal(float, float)
+
+    def __init__(self, width=155, height=90, parent=None):
+        super().__init__(parent)
+        self.scene = QGraphicsScene(self)
+        self.setScene(self.scene)
+        self.setFixedSize(width+2, height+2)
+        rect = QGraphicsRectItem(0, 0, width, height)
+        rect.setBrush(Qt.lightGray)
+        self.scene.addItem(rect)
+
+    def mousePressEvent(self, event):
+        pos = self.mapToScene(event.pos())
+        self.clicked.emit(pos.x(), pos.y())
+        super().mousePressEvent(event)
+
 # ------------------------------ Main Window ------------------------------
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-
+        self.setWindowTitle("Robot Arm Viewer (Matplotlib)")
+        self.resize(1280, 800)
 
         self.cfg = ArmConfig()
         self.arm = RobotArm(self.cfg)
 
+        # 초기 스크린 값
+        self.screen_x0 = 60
+        self.screen_y0 = -45
+        self.screen_z0 = 0
+        self.screen_w  = 90
+        self.screen_h  = 155
 
+        # Matplotlib Figure
         self.fig = Figure(figsize=(7.5, 6.25))
         self.canvas = FigureCanvas(self.fig)
         self.ax = self.fig.add_subplot(111, projection='3d')
-        self.toolbar = NavigationToolbar(self.canvas, self)
-
+        self.toolbar = NavigationToolbar(self.canvas, self.canvas)
 
         self.joint_group = self._make_controls()
-
 
         self.ee_label = QLabel("")
         self.btn_home = QPushButton("Home pose")
         self.btn_home.clicked.connect(self._go_home)
 
-
         self.btn_exit = QPushButton("Exit")
-        self.btn_exit.setFixedSize(300, 100)
+        self.btn_exit.setFixedSize(300, 50)
         self.btn_exit.clicked.connect(QApplication.quit)
 
-
-        # XYZ 좌표 입력칸 추가
+        # XYZ 입력칸
         self.target_x = QDoubleSpinBox(); self.target_x.setRange(0, 200); self.target_x.setSuffix(" mm")
         self.target_y = QDoubleSpinBox(); self.target_y.setRange(-100, 100); self.target_y.setSuffix(" mm")
         self.target_z = QDoubleSpinBox(); self.target_z.setRange(0, 200); self.target_z.setSuffix(" mm")
         self.btn_move = QPushButton("Move to XYZ")
         self.btn_move.clicked.connect(self._move_to_xyz)
-
 
         xyz_layout = QHBoxLayout()
         xyz_layout.addWidget(QLabel("X:")); xyz_layout.addWidget(self.target_x)
@@ -240,12 +148,44 @@ class MainWindow(QMainWindow):
         xyz_layout.addWidget(QLabel("Z:")); xyz_layout.addWidget(self.target_z)
         xyz_layout.addWidget(self.btn_move)
 
+        # 📌 스크린 설정 입력칸
+        self.screen_x_in = QDoubleSpinBox(); self.screen_x_in.setRange(-200,200); self.screen_x_in.setValue(self.screen_x0)
+        self.screen_y_in = QDoubleSpinBox(); self.screen_y_in.setRange(-200,200); self.screen_y_in.setValue(self.screen_y0)
+        self.screen_z_in = QDoubleSpinBox(); self.screen_z_in.setRange(0,200);   self.screen_z_in.setValue(self.screen_z0)
+        self.screen_w_in = QDoubleSpinBox(); self.screen_w_in.setRange(10,400);  self.screen_w_in.setValue(self.screen_w)
+        self.screen_h_in = QDoubleSpinBox(); self.screen_h_in.setRange(10,400);  self.screen_h_in.setValue(self.screen_h)
+        self.btn_screen = QPushButton("Update Screen")
+        self.btn_screen.clicked.connect(self._update_screen)
+
+        # 좌표 (X,Y,Z) 한 줄
+        coord_layout = QHBoxLayout()
+        coord_layout.addWidget(QLabel("screenX0:")); coord_layout.addWidget(self.screen_x_in)
+        coord_layout.addWidget(QLabel("screenY0:")); coord_layout.addWidget(self.screen_y_in)
+        coord_layout.addWidget(QLabel("screenZ0:")); coord_layout.addWidget(self.screen_z_in)
+
+        # 크기 (screenW, screenH) 한 줄
+        size_layout = QHBoxLayout()
+        size_layout.addWidget(QLabel("screenW:")); size_layout.addWidget(self.screen_w_in)
+        size_layout.addWidget(QLabel("screenH:")); size_layout.addWidget(self.screen_h_in)
+
+        # 전체 스크린 입력 레이아웃
+        screen_layout = QVBoxLayout()
+        screen_layout.addLayout(coord_layout)
+        screen_layout.addLayout(size_layout)
+        screen_layout.addWidget(self.btn_screen)
+
+
+        # Touch screen
+        self.touch_screen = TouchScreen(int(self.screen_w*2), int(self.screen_h*2))
+        self.touch_screen.clicked.connect(self._on_screen_click)
 
         right = QVBoxLayout()
         right.addWidget(self.joint_group)
         right.addWidget(self.btn_home)
         right.addWidget(self.ee_label)
         right.addLayout(xyz_layout)
+        right.addLayout(screen_layout)   # ✅ 새로 만든 레이아웃
+        right.addWidget(self.touch_screen)
         right.addStretch(1)
         right.addWidget(self.btn_exit, alignment=Qt.AlignRight | Qt.AlignBottom)
 
@@ -259,63 +199,14 @@ class MainWindow(QMainWindow):
         main.addLayout(right, 1)
         self.setCentralWidget(center)
 
-
         self._elev = self.ax.elev
         self._azim = self.ax.azim
-
 
         self._redraw()
         self.canvas.mpl_connect("button_release_event", self._update_view)
         self.canvas.mpl_connect("motion_notify_event", self._update_view)
 
-    def _go_home(self):
-        self.j1.setValue(self.cfg.j1.home); self._on_joint_change(0, self.cfg.j1.home)
-        self.j2.setValue(self.cfg.j2.home); self._on_joint_change(1, self.cfg.j2.home)
-        self.j3.setValue(self.cfg.j3.home); self._on_joint_change(2, self.cfg.j3.home)
-        self.j4.setValue(self.cfg.j4.home); self._on_joint_change(3, self.cfg.j4.home)
-        self.j5.setValue(self.cfg.j5.home); self._on_joint_change(4, self.cfg.j5.home)
-
-    def _on_joint_change(self, idx: int, val: float):
-        self.arm.q[idx] = float(val)
-        self._update_robot_angle(idx, val)
-        self._redraw()
-
-    def _update_robot_angle(self, idx: int, sim_val: float):
-        name = f"J{idx+1}"
-        if name in self.cfg.servo_map:
-            sim_min, sim_max, rob_min, rob_max = self.cfg.servo_map[name]
-            rob_angle = sim2robot(sim_val, sim_min, sim_max, rob_min, rob_max)
-            [self.j1, self.j2, self.j3, self.j4, self.j5][idx].lbl_robot.setText(f"Robot: {rob_angle:5.1f}°")
-
-    def _move_to_xyz(self):
-        x, y, z = self.target_x.value(), self.target_y.value(), self.target_z.value()
-        L1, L2 = self.cfg.L1, self.cfg.L2
-        dz = self.cfg.BaseHeight - z
-        r_xy = math.hypot(x, y)
-        d = math.sqrt(r_xy**2 + dz**2)
-
-
-        if d > (L1 + L2) or d < abs(L1 - L2):
-            self.ee_label.setText("Out of reach")
-            return
-
-
-        q1 = math.atan2(y, x)
-        cos_q3 = (d**2 - L1**2 - L2**2) / (2*L1*L2)
-        cos_q3 = max(-1.0, min(1.0, cos_q3))
-        q3 = math.acos(cos_q3)
-        q2 = math.atan2(dz, r_xy) - math.atan2(L2*math.sin(q3), L1 + L2*math.cos(q3))
-
-
-        q1_deg, q2_deg, q3_deg = map(math.degrees, (q1, q2, q3))
-
-
-        self.j1.setValue(q1_deg); self._on_joint_change(0, q1_deg)
-        self.j2.setValue(q2_deg); self._on_joint_change(1, q2_deg)
-        self.j3.setValue(q3_deg); self._on_joint_change(2, q3_deg)
-
     # --- controls (sliders + buttons)
-
     def _make_controls(self) -> QGroupBox:
         gb = QGroupBox("Controls")
         fl = QFormLayout(gb)
@@ -337,7 +228,6 @@ class MainWindow(QMainWindow):
         self.j4.valueChanged.connect(lambda v: self._on_joint_change(3, v))
         self.j5.valueChanged.connect(lambda v: self._on_joint_change(4, v))
 
-        # Ortho view buttons
         btn_x = QPushButton("View X-axis")
         btn_x.clicked.connect(self._set_view_x)
         btn_y = QPushButton("View Y-axis")
@@ -349,83 +239,129 @@ class MainWindow(QMainWindow):
         fl.addRow(btn_z)
         return gb
 
-    # --- view helpers
+    # --- joint handlers
+    def _go_home(self):
+        self.j1.setValue(self.cfg.j1.home); self._on_joint_change(0, self.cfg.j1.home)
+        self.j2.setValue(self.cfg.j2.home); self._on_joint_change(1, self.cfg.j2.home)
+        self.j3.setValue(self.cfg.j3.home); self._on_joint_change(2, self.cfg.j3.home)
+        self.j4.setValue(self.cfg.j4.home); self._on_joint_change(3, self.cfg.j4.home)
+        self.j5.setValue(self.cfg.j5.home); self._on_joint_change(4, self.cfg.j5.home)
+
+    def _on_joint_change(self, idx: int, val: float):
+        self.arm.q[idx] = float(val)
+        self._update_robot_angle(idx, val)
+        self._redraw()
+
+    def _update_robot_angle(self, idx: int, sim_val: float):
+        name = f"J{idx+1}"
+        if name in self.cfg.servo_map:
+            sim_min, sim_max, rob_min, rob_max = self.cfg.servo_map[name]
+            rob_angle = sim2robot(sim_val, sim_min, sim_max, rob_min, rob_max)
+            [self.j1, self.j2, self.j3, self.j4, self.j5][idx].lbl_robot.setText(f"Robot: {rob_angle:5.1f}°")
+
+    def _move_to_xyz(self):
+        # 간단한 IK (현재 L1,L2,L3만 사용)
+        x, y, z = self.target_x.value(), self.target_y.value(), self.target_z.value()
+        L1, L2, L3 = self.cfg.L1, self.cfg.L2, self.cfg.L3
+
+        q1 = math.atan2(y, x)
+        r_xy = math.hypot(x, y)
+        x2 = r_xy - L3
+        z2 = z - self.cfg.BaseHeight
+        d = math.sqrt(x2**2 + z2**2)
+        if d > (L1 + L2) or d < abs(L1 - L2):
+            self.ee_label.setText("Out of reach")
+            return
+
+        cos_q3 = (d**2 - L1**2 - L2**2) / (2*L1*L2)
+        cos_q3 = max(-1.0, min(1.0, cos_q3))
+        q3 = math.acos(cos_q3)
+        q2 = math.atan2(z2, x2) - math.atan2(L2*math.sin(q3), L1 + L2*math.cos(q3))
+
+        q1_deg, q2_deg, q3_deg = map(math.degrees, (q1, q2, q3))
+        self.j1.setValue(q1_deg); self._on_joint_change(0, q1_deg)
+        self.j2.setValue(q2_deg); self._on_joint_change(1, q2_deg)
+        self.j3.setValue(q3_deg); self._on_joint_change(2, q3_deg)
+
+    # --- screen
+    def _update_screen(self):
+    # 입력값 반영
+        self.screen_x0 = self.screen_x_in.value()
+        self.screen_y0 = self.screen_y_in.value()
+        self.screen_z0 = self.screen_z_in.value()
+        self.screen_w = self.screen_w_in.value()
+        self.screen_h = self.screen_h_in.value()
+
+        # 기존 touch_screen 제거 후 새로 생성
+        new_touch = TouchScreen(int(self.screen_w*2), int(self.screen_h*2))
+        new_touch.clicked.connect(self._on_screen_click)
+
+        # 레이아웃에서 기존 위젯 교체
+        parent_layout = self.touch_screen.parent().layout()
+        parent_layout.replaceWidget(self.touch_screen, new_touch)
+        self.touch_screen.deleteLater()
+        self.touch_screen = new_touch
+
+        # 3D View 갱신
+        self._redraw()
+
+
+    def _draw_screen(self):
+        X, Y = np.meshgrid(
+            [self.screen_x0, self.screen_x0 + self.screen_w],
+            [self.screen_y0, self.screen_y0 + self.screen_h]
+        )
+        Z = np.ones_like(X) * self.screen_z0
+        self.ax.plot_surface(X, Y, Z, color='skyblue', alpha=0.3)
+
+    def _on_screen_click(self, sx, sy):
+        u = sx / self.touch_screen.width()
+        v = sy / self.touch_screen.height()
+        x = self.screen_x0 + u * self.screen_w
+        y = self.screen_y0 + v * self.screen_h
+        z = self.screen_z0
+        self.target_x.setValue(x)
+        self.target_y.setValue(y)
+        self.target_z.setValue(z)
+        self._move_to_xyz()
+
+    # --- view
     def _update_view(self, event=None):
         self._elev, self._azim = self.ax.elev, self.ax.azim
 
     def _set_view_x(self):
-        self.ax.view_init(elev=0, azim=0)
-        self._update_view()
-        self.canvas.draw_idle()
-
+        self.ax.view_init(elev=0, azim=0); self._update_view(); self.canvas.draw_idle()
     def _set_view_y(self):
-        self.ax.view_init(elev=0, azim=90)
-        self._update_view()
-        self.canvas.draw_idle()
-
+        self.ax.view_init(elev=0, azim=90); self._update_view(); self.canvas.draw_idle()
     def _set_view_z(self):
-        self.ax.view_init(elev=90, azim=-90)
-        self._update_view()
-        self.canvas.draw_idle()
+        self.ax.view_init(elev=90, azim=-90); self._update_view(); self.canvas.draw_idle()
 
-    # --- core drawing
+    # --- redraw
     def _redraw(self):
         elev, azim = self._elev, self._azim
-
         pts = self.arm.fk_points()
         P = np.array(pts)
-
         self.ax.cla()
 
-        # Base reach (reduced for zoom-in)
-        base_reach = (self.cfg.L1 + self.cfg.L2 + self.cfg.L3 + 80) * 0.75
-        # To show correct proportions from any view, use equal span on each axis
-        span = base_reach  # same span for X, Y, Z
-        self.ax.set_xlim(0, span)                 # X only positive
-        self.ax.set_ylim(-span/2, span/2)         # make Y span == X span
-        self.ax.set_zlim(0, span)                 # Z positive
-
+        span = (self.cfg.L1 + self.cfg.L2 + self.cfg.L3 + 80) * 0.75
+        self.ax.set_xlim(0, span)
+        self.ax.set_ylim(-span/2, span/2)
+        self.ax.set_zlim(0, span)
         self.ax.set_xlabel('X (mm)')
         self.ax.set_ylabel('Y (mm)')
         self.ax.set_zlabel('Z (mm)')
         self.ax.view_init(elev=elev, azim=azim)
-        self.ax.set_box_aspect([1, 1, 1])         # equal unit lengths
+        self.ax.set_box_aspect([1,1,1])
 
-        # draw links
         self.ax.plot(P[:,0], P[:,1], P[:,2], marker='o')
         self.ax.scatter(P[-1,0], P[-1,1], P[-1,2], s=40)
 
-        # draw frames for shoulder..wrist
-        Ts = self.arm.joint_frames()
-        for idx in [2,3,4,5,6]:
-            self._draw_frame(Ts[idx], axis_len=25)
-
-        # EE label
         ee = P[-1]
         self.ee_label.setText(f"EE: X={ee[0]:.1f} mm, Y={ee[1]:.1f} mm, Z={ee[2]:.1f} mm")
 
-        # 7-inch screen on XY plane (laid flat). Portrait orientation: X=90 (width), Y=155 (height)
-        screen_w, screen_h = 90, 155
-        screen_x0 = 60  # start at X=60mm
-        X, Y = np.meshgrid([screen_x0, screen_x0 + screen_w],
-                           [-screen_h/2, +screen_h/2])
-        Z = np.zeros_like(X)
-        self.ax.plot_surface(X, Y, Z, color='skyblue', alpha=0.3, shade=False)
-
-        # ground cross lines
-        self.ax.plot([0, span], [0, 0], [0, 0], alpha=0.2)
-        self.ax.plot([0, 0], [-span/2, span/2], [0, 0], alpha=0.2)
-
+        # 스크린 그리기
+        self._draw_screen()
         self.canvas.draw_idle()
-
-    def _draw_frame(self, T: np.ndarray, axis_len: float = 20.0):
-        o = T[:3, 3]
-        R = T[:3, :3]
-        axes = [R[:,0], R[:,1], R[:,2]]
-        colors = ['r', 'g', 'b']
-        for a, c in zip(axes, colors):
-            u, v, w = (a * axis_len)
-            self.ax.quiver(o[0], o[1], o[2], u, v, w, color=c, length=1, normalize=False)
 
 # ------------------------------ main ------------------------------
 
