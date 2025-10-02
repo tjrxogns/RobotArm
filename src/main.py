@@ -139,7 +139,6 @@ class RobotArm:
 
 class SliderWithBox(QWidget):
     valueChanged = QtCore.Signal(float)
-
     def __init__(self, lo: float, hi: float, step: float, init: float, unit: str = "", parent=None):
         super().__init__(parent)
         self._scale = 100.0
@@ -202,8 +201,6 @@ class SliderWithBox(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Robot Arm Viewer (Matplotlib)")
-        self.resize(1280, 800)
 
 
         self.cfg = ArmConfig()
@@ -224,16 +221,31 @@ class MainWindow(QMainWindow):
         self.btn_home.clicked.connect(self._go_home)
 
 
-        # 종료 버튼 추가
         self.btn_exit = QPushButton("Exit")
-        self.btn_exit.setFixedSize(300, 100) # width=300, height=100 pixel
+        self.btn_exit.setFixedSize(300, 100)
         self.btn_exit.clicked.connect(QApplication.quit)
+
+
+        # XYZ 좌표 입력칸 추가
+        self.target_x = QDoubleSpinBox(); self.target_x.setRange(0, 200); self.target_x.setSuffix(" mm")
+        self.target_y = QDoubleSpinBox(); self.target_y.setRange(-100, 100); self.target_y.setSuffix(" mm")
+        self.target_z = QDoubleSpinBox(); self.target_z.setRange(0, 200); self.target_z.setSuffix(" mm")
+        self.btn_move = QPushButton("Move to XYZ")
+        self.btn_move.clicked.connect(self._move_to_xyz)
+
+
+        xyz_layout = QHBoxLayout()
+        xyz_layout.addWidget(QLabel("X:")); xyz_layout.addWidget(self.target_x)
+        xyz_layout.addWidget(QLabel("Y:")); xyz_layout.addWidget(self.target_y)
+        xyz_layout.addWidget(QLabel("Z:")); xyz_layout.addWidget(self.target_z)
+        xyz_layout.addWidget(self.btn_move)
 
 
         right = QVBoxLayout()
         right.addWidget(self.joint_group)
         right.addWidget(self.btn_home)
         right.addWidget(self.ee_label)
+        right.addLayout(xyz_layout)
         right.addStretch(1)
         right.addWidget(self.btn_exit, alignment=Qt.AlignRight | Qt.AlignBottom)
 
@@ -257,19 +269,11 @@ class MainWindow(QMainWindow):
         self.canvas.mpl_connect("motion_notify_event", self._update_view)
 
     def _go_home(self):
-        self.arm.q[:] = [
-            self.cfg.j1.home,
-            self.cfg.j2.home,
-            self.cfg.j3.home,
-            self.cfg.j4.home,
-            self.cfg.j5.home,
-        ]
-        for i, w in enumerate([self.j1, self.j2, self.j3, self.j4, self.j5]):
-            w.blockSignals(True)
-            w.setValue(self.arm.q[i])
-            w.blockSignals(False)
-            self._update_robot_angle(i, self.arm.q[i])
-        self._redraw()
+        self.j1.setValue(self.cfg.j1.home); self._on_joint_change(0, self.cfg.j1.home)
+        self.j2.setValue(self.cfg.j2.home); self._on_joint_change(1, self.cfg.j2.home)
+        self.j3.setValue(self.cfg.j3.home); self._on_joint_change(2, self.cfg.j3.home)
+        self.j4.setValue(self.cfg.j4.home); self._on_joint_change(3, self.cfg.j4.home)
+        self.j5.setValue(self.cfg.j5.home); self._on_joint_change(4, self.cfg.j5.home)
 
     def _on_joint_change(self, idx: int, val: float):
         self.arm.q[idx] = float(val)
@@ -283,7 +287,35 @@ class MainWindow(QMainWindow):
             rob_angle = sim2robot(sim_val, sim_min, sim_max, rob_min, rob_max)
             [self.j1, self.j2, self.j3, self.j4, self.j5][idx].lbl_robot.setText(f"Robot: {rob_angle:5.1f}°")
 
+    def _move_to_xyz(self):
+        x, y, z = self.target_x.value(), self.target_y.value(), self.target_z.value()
+        L1, L2 = self.cfg.L1, self.cfg.L2
+        dz = self.cfg.BaseHeight - z
+        r_xy = math.hypot(x, y)
+        d = math.sqrt(r_xy**2 + dz**2)
+
+
+        if d > (L1 + L2) or d < abs(L1 - L2):
+            self.ee_label.setText("Out of reach")
+            return
+
+
+        q1 = math.atan2(y, x)
+        cos_q3 = (d**2 - L1**2 - L2**2) / (2*L1*L2)
+        cos_q3 = max(-1.0, min(1.0, cos_q3))
+        q3 = math.acos(cos_q3)
+        q2 = math.atan2(dz, r_xy) - math.atan2(L2*math.sin(q3), L1 + L2*math.cos(q3))
+
+
+        q1_deg, q2_deg, q3_deg = map(math.degrees, (q1, q2, q3))
+
+
+        self.j1.setValue(q1_deg); self._on_joint_change(0, q1_deg)
+        self.j2.setValue(q2_deg); self._on_joint_change(1, q2_deg)
+        self.j3.setValue(q3_deg); self._on_joint_change(2, q3_deg)
+
     # --- controls (sliders + buttons)
+
     def _make_controls(self) -> QGroupBox:
         gb = QGroupBox("Controls")
         fl = QFormLayout(gb)
