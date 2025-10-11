@@ -1,4 +1,4 @@
-# main.py (251011 복원 + 튜닝 통합버전 — FINAL)
+# main.py (251011 복원+튜닝+베이스 기둥 가시화 — 인터랙션 안정화)
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QSlider, QPushButton, QLineEdit, QFormLayout, QFrame
@@ -43,7 +43,7 @@ class TouchScreenSim(QLabel):
 class RobotArmViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("로봇팔 3D 뷰어 (251011 복원 + 튜닝)")
+        self.setWindowTitle("로봇팔 3D 뷰어 (251011)")
         self.setGeometry(50, 50, 1200, 700)
 
         self.robot = RobotArm()
@@ -66,7 +66,6 @@ class RobotArmViewer(QMainWindow):
         left_frame = QFrame(); left_layout = QVBoxLayout(left_frame)
         self.fig = Figure(); self.canvas = FigureCanvas(self.fig)
         self.ax = self.fig.add_subplot(111, projection='3d')
-        self.canvas.mpl_connect('button_press_event', self.on_click)
         left_layout.addWidget(self.canvas); main_layout.addWidget(left_frame, stretch=2)
 
         right_frame = QFrame(); right_frame.setFixedWidth(450)
@@ -85,7 +84,8 @@ class RobotArmViewer(QMainWindow):
         self.sliders = {}
         for axis in ["X","Y","Z"]:
             hl=QHBoxLayout(); lbl=QLabel(f"{axis}:"); sld=QSlider(Qt.Horizontal)
-            sld.setRange(-200,200); sld.setValue(0)
+            sld.setRange(-200,200); sld.setValue(0); sld.setTracking(True)
+            sld.valueChanged.connect(self.update_from_xyz)
             sld.sliderReleased.connect(self.update_from_xyz)
             hl.addWidget(lbl); hl.addWidget(sld); right_layout.addLayout(hl)
             self.sliders[axis]=sld
@@ -95,7 +95,8 @@ class RobotArmViewer(QMainWindow):
         self.joint_sliders={}; self.joint_labels={}
         for i in range(5):
             hl=QHBoxLayout(); lbl=QLabel(f"J{i+1}:"); sld=QSlider(Qt.Horizontal)
-            sld.setRange(-90,90); sld.setValue(0)
+            sld.setRange(-90,90); sld.setValue(0); sld.setTracking(True)
+            sld.valueChanged.connect(self.update_from_joints)
             sld.sliderReleased.connect(self.update_from_joints)
             lbl_ang=QLabel("0°"); lbl_ang.setFixedWidth(50)
             hl.addWidget(lbl); hl.addWidget(sld); hl.addWidget(lbl_ang)
@@ -103,13 +104,19 @@ class RobotArmViewer(QMainWindow):
 
         # === 스크린 입력창 ===
         form = QFormLayout()
+        # Edits
         self.ed_screenX0, self.ed_screenY0, self.ed_screenZ0 = QLineEdit(str(self.screenX0)), QLineEdit(str(self.screenY0)), QLineEdit(str(self.screenZ0))
         self.ed_screenW, self.ed_screenH = QLineEdit(str(self.screenW)), QLineEdit(str(self.screenH))
         for ed in [self.ed_screenX0, self.ed_screenY0, self.ed_screenZ0, self.ed_screenW, self.ed_screenH]:
             ed.setValidator(QDoubleValidator(-10000.0, 10000.0, 2)); ed.setMaximumWidth(120)
-        form.addRow("screenX0", self.ed_screenX0)
-        form.addRow("screenY0", self.ed_screenY0)
-        form.addRow("screenZ0", self.ed_screenZ0)
+        # XYZ 한 줄 배치
+        xyz_row = QWidget()
+        xyz_lay = QHBoxLayout(xyz_row); xyz_lay.setContentsMargins(0,0,0,0); xyz_lay.setSpacing(6)
+        xyz_lay.addWidget(QLabel("X0")); xyz_lay.addWidget(self.ed_screenX0)
+        xyz_lay.addWidget(QLabel("Y0")); xyz_lay.addWidget(self.ed_screenY0)
+        xyz_lay.addWidget(QLabel("Z0")); xyz_lay.addWidget(self.ed_screenZ0)
+        form.addRow(QLabel("Screen XYZ"), xyz_row)
+        # W/H는 기존처럼
         form.addRow("screenW", self.ed_screenW)
         form.addRow("screenH", self.ed_screenH)
         btn_apply = QPushButton("터치스크린 적용"); btn_apply.clicked.connect(self.apply_screen)
@@ -125,25 +132,23 @@ class RobotArmViewer(QMainWindow):
         btn_send=QPushButton("현재 각도 전송"); btn_send.clicked.connect(self.send_to_robot)
         right_layout.addWidget(btn_connect); right_layout.addWidget(btn_send)
 
+        # EE 좌표 표시 라벨
+        self.lbl_ee = QLabel("EE: (0.0, 0.0, 0.0)")
+        right_layout.addWidget(self.lbl_ee)
+
         right_layout.addStretch(1)
         main_layout.addWidget(right_frame, stretch=1)
 
-    def on_click(self, event):
-        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
-            return
-        x, y = float(event.xdata), float(event.ydata)
-        if (self.screenX0 <= x <= self.screenX0 + self.screenW) and (self.screenY0 <= y <= self.screenY0 + self.screenH):
-            self.clicked_xy = (x, y)
-            self.lbl_click.setText(f"3D 터치 클릭: ({x:.1f}, {y:.1f}) @Z={self.screenZ0:.1f}")
-            self.robot.inverse_kinematics(x, y, self.screenZ0)
-            self.update_all()
-
     def on_touchscreen_click(self, x, y, w, h):
-        rel_x=x/w; rel_y=1-(y/h)
-        tx=self.screenX0+self.screenW*rel_x; ty=self.screenY0+self.screenH*rel_y
-        tz=self.screenZ0
-        self.lbl_click.setText(f"터치: ({tx:.1f},{ty:.1f}) @Z={tz:.1f}")
-        self.robot.inverse_kinematics(tx,ty,tz)
+        self.apply_screen()
+        rel_x = x / max(w, 1)
+        rel_y = 1 - (y / max(h, 1))
+        tx = self.screenX0 + self.screenW * rel_x
+        ty = self.screenY0 + self.screenH * rel_y
+        tz = self.screenZ0
+        self.clicked_xy = (tx, ty)
+        self.lbl_click.setText(f"터치: ({tx:.1f}, {ty:.1f}) @Z={tz:.1f}")
+        self.robot.inverse_kinematics(tx, ty, tz)
         self.update_all()
 
     def update_from_xyz(self):
@@ -154,7 +159,8 @@ class RobotArmViewer(QMainWindow):
         self.update_all()
 
     def update_from_joints(self):
-        for i,s in self.joint_sliders.items(): self.robot.joints[i]=s.value()
+        for i,s in self.joint_sliders.items():
+            self.robot.joints[i]=s.value()
         self.robot.update_end_effector(); self.update_all()
 
     def set_view(self, mode):
@@ -196,9 +202,42 @@ class RobotArmViewer(QMainWindow):
 
     def update_view(self):
         self.ax.clear()
+        # 베이스 기둥
+        bx, by, bz = self.robot.base
+        self.ax.plot([bx, bx], [by, by], [0, bz], linewidth=4, color='k')
+        s = 6
+        xs = [bx-s, bx+s, bx+s, bx-s, bx-s]
+        ys = [by-s, by-s, by+s, by+s, by-s]
+        zs = [bz, bz, bz, bz, bz]
+        self.ax.plot(xs, ys, zs, color='k')
+
         pts=self.robot.forward_kinematics(); xs,ys,zs=zip(*pts)
         self.ax.plot(xs,ys,zs,marker='o',linewidth=3,color='blue')
-        ex,ey,ez=self.robot.end_effector; self.ax.scatter([ex],[ey],[ez],color='red',s=50)
+        # J2/J3/J4/EE 마커
+        j2_pos, j3_pos, j4_pos, ee_pos = self.robot.joint_positions()
+        self.ax.scatter([j2_pos[0]],[j2_pos[1]],[j2_pos[2]], color='orange', s=50)
+        self.ax.scatter([j3_pos[0]],[j3_pos[1]],[j3_pos[2]], color='purple', s=50)
+        self.ax.scatter([j4_pos[0]],[j4_pos[1]],[j4_pos[2]], color='cyan', s=40)
+        self.ax.scatter([ee_pos[0]],[ee_pos[1]],[ee_pos[2]], color='red', s=50)
+
+        # === 각 관절 각도 3D 라벨 ===
+        j2_pos, j3_pos, j4_pos, ee_pos = self.robot.joint_positions()
+        jdeg = self.robot.joints
+        bx, by, bz = self.robot.base
+
+        self.ax.text(bx,         by,         bz + 10, f"J1 {jdeg[0]:.1f}°", fontsize=8)
+        self.ax.text(j2_pos[0],  j2_pos[1],  j2_pos[2] + 8,  f"J2 {jdeg[1]:.1f}°", fontsize=8)
+        self.ax.text(j3_pos[0],  j3_pos[1],  j3_pos[2] + 8,  f"J3 {jdeg[2]:.1f}°", fontsize=8)
+        self.ax.text(j4_pos[0],  j4_pos[1],  j4_pos[2] + 8,  f"J4 {jdeg[3]:.1f}°", fontsize=8)
+        self.ax.text(ee_pos[0],  ee_pos[1],  ee_pos[2] + 12, f"J5 {jdeg[4]:.1f}°", fontsize=8)
+
+        
+
+        # EE 좌표 텍스트 표시 + 패널 라벨 갱신
+        self.ax.text(ee_pos[0], ee_pos[1], ee_pos[2] + 5, f"EE ({ee_pos[0]:.1f}, {ee_pos[1]:.1f}, {ee_pos[2]:.1f})", fontsize=8)
+        if hasattr(self, 'lbl_ee'):
+            self.lbl_ee.setText(f"EE: ({ee_pos[0]:.1f}, {ee_pos[1]:.1f}, {ee_pos[2]:.1f})")
+
         self.draw_touch_screen()
         if self.clicked_xy is not None:
             cx, cy = self.clicked_xy; self.ax.scatter([cx],[cy],[self.screenZ0],color='magenta',s=60)
