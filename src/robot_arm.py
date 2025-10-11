@@ -1,115 +1,126 @@
-# 프로젝트 파일 구조를 두 개로 분리합니다.
-# 1. robot_arm.py → 로봇팔 계산 로직 전용 (Forward/Inverse Kinematics)
-# 2. main.py → UI 및 그림 전용 (PySide6 + Matplotlib)
+# robot_arm.py
+# NaN 방지 / 거리 제한 / 안정 역기구학 버전
 
-# ----------------------------- robot_arm.py -----------------------------
-
-import math
 import numpy as np
-from dataclasses import dataclass, field
-
-
-def deg2rad(d: float) -> float:
-    return d * math.pi / 180.0
-
-
-def sim2robot(sim_angle: float, sim_min: float, sim_max: float, rob_min: float, rob_max: float) -> float:
-    return float(np.interp(sim_angle, [sim_min, sim_max], [rob_min, rob_max]))
-
-
-@dataclass
-class RevoluteLimit:
-    soft_min: float
-    soft_max: float
-    hard_min: float
-    hard_max: float
-    resolution: float = 0.1
-    home: float = 0.0
-
-
-@dataclass
-class ArmConfig:
-    BaseHeight: float = 20.0
-    L1: float = 120.0
-    L2: float = 110.0
-    L3: float = 60.0
-
-    j1: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90, 90, -90, 90, 0.1, 0))
-    j2: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90, 0, -90, 0, 0.1, -70))
-    j3: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-20, 140, -20, 140, 0.1, 120))
-    j4: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90, 90, -90, 90, 0.1, 10))
-    j5: RevoluteLimit = field(default_factory=lambda: RevoluteLimit(-90, 90, -90, 90, 0.1, 0))
-
-    servo_map: dict = field(default_factory=lambda: {
-        "J1": (-90, 90, 0, 180),
-        "J2": (-90, 10, 120, 20),
-        "J3": (0, 140, 30, 170),
-        "J4": (-90, 90, 0, 180),
-        "J5": (-90, 90, 0, 180),
-    })
-
 
 class RobotArm:
-    def __init__(self, cfg: ArmConfig):
-        self.cfg = cfg
-        self.q = np.array([cfg.j1.home, cfg.j2.home, cfg.j3.home, cfg.j4.home, cfg.j5.home], dtype=float)
+    def __init__(self):
+        # ===== 기본 구조 =====
+        self.base = np.array([0.0, 0.0, 20.0])  # 베이스 상단 높이 20mm
+        self.L1 = 60.0   # shoulder to elbow
+        self.L2 = 80.0   # elbow to wrist
+        self.L3 = 70.0   # wrist to end-effector
 
-    def joint_frames(self, q=None):
-        if q is None:
-            q = self.q
-        q1_deg, q2_deg, q3_deg, q4_deg, q5_deg = q
-        q1, q2, q3, q4, q5 = map(deg2rad, (q1_deg, q2_deg, q3_deg, q4_deg, q5_deg))
-        BH, L1, L2, L3 = self.cfg.BaseHeight, self.cfg.L1, self.cfg.L2, self.cfg.L3
+        # ===== 관절 초기값 =====
+        self.joints = [0.0, 0.0, 0.0, 0.0, 0.0]
+        self.end_effector = np.array([0.0, 0.0, 0.0])
 
-        Ts = []
-        T = np.eye(4)
-        Ts.append(T.copy())
+        # ===== servo map (2025-09-30 기준) =====
+        self.servo_map = {
+            0: (-90, 90, 0, 180),   # J1
+            1: (-90, 10, 120, 20),  # J2
+            2: (0, 140, 30, 170),   # J3
+            3: (-90, 90, 0, 180),   # J4
+            4: (-90, 90, 0, 180),   # J5
+        }
 
-        # J1
-        T = T @ np.array([[ math.cos(q1), -math.sin(q1), 0, 0],
-                          [ math.sin(q1),  math.cos(q1), 0, 0],
-                          [ 0,             0,            1, 0],
-                          [ 0,             0,            0, 1]])
-        T = T @ np.array([[1,0,0,0],[0,1,0,0],[0,0,1,BH],[0,0,0,1]])
-        Ts.append(T.copy())
+    # =========================
+    # 순기구학 (Forward Kinematics)
+    # =========================
+    def forward_kinematics(self):
+        j1, j2, j3, j4, j5 = np.radians(self.joints)
 
-        # J2
-        T = T @ np.array([[ math.cos(q2), 0, math.sin(q2), 0],
-                          [ 0,            1, 0,            0],
-                          [-math.sin(q2), 0, math.cos(q2), 0],
-                          [ 0,            0, 0, 1]])
-        Ts.append(T.copy())
+        x0, y0, z0 = self.base
 
-        # L1
-        T = T @ np.array([[1,0,0,L1],[0,1,0,0],[0,0,1,0],[0,0,0,1]])
-        Ts.append(T.copy())
+        # Shoulder (J1, J2)
+        x1 = x0
+        y1 = y0
+        z1 = z0 + self.L1 * np.cos(j2)
 
-        # J3
-        T = T @ np.array([[ math.cos(q3), 0, math.sin(q3), 0],
-                          [ 0,            1, 0,            0],
-                          [-math.sin(q3), 0, math.cos(q3), 0],
-                          [ 0,            0, 0, 1]])
-        Ts.append(T.copy())
+        # Elbow
+        x2 = x1 + self.L2 * np.cos(j2 + j3) * np.cos(j1)
+        y2 = y1 + self.L2 * np.cos(j2 + j3) * np.sin(j1)
+        z2 = z1 + self.L2 * np.sin(j2 + j3)
 
-        # J4 + L2
-        T = T @ np.array([[ math.cos(q4), 0, math.sin(q4), L2],
-                          [ 0,            1, 0,             0],
-                          [-math.sin(q4), 0, math.cos(q4),  0],
-                          [ 0,            0, 0,             1]])
-        Ts.append(T.copy())
+        # Wrist (End Effector)
+        x3 = x2 + self.L3 * np.cos(j2 + j3 + j4) * np.cos(j1)
+        y3 = y2 + self.L3 * np.cos(j2 + j3 + j4) * np.sin(j1)
+        z3 = z2 + self.L3 * np.sin(j2 + j3 + j4)
 
-        # J5 + L3
-        T = T @ np.array([[ 1, 0,            0,           L3],
-                          [ 0, math.cos(q5),-math.sin(q5),0 ],
-                          [ 0, math.sin(q5), math.cos(q5),0 ],
-                          [ 0, 0,            0,           1 ]])
-        Ts.append(T.copy())
+        self.end_effector = np.array([x3, y3, z3])
+        return [self.base, [x1, y1, z1], [x2, y2, z2], [x3, y3, z3]]
 
-        return Ts
+    # =========================
+    # 역기구학 (Inverse Kinematics)
+    # =========================
+    def inverse_kinematics(self, x, y, z):
+        dx = x - self.base[0]
+        dy = y - self.base[1]
+        dz = z - self.base[2]
 
-    def fk_points(self, q=None):
-        return [T[:3,3].copy() for T in self.joint_frames(q)]
+        # 도달 가능 거리 확인
+        max_reach = self.L1 + self.L2 + self.L3 - 5
+        dist = np.sqrt(dx**2 + dy**2 + dz**2)
+        if dist > max_reach:
+            print("⚠️ Target out of reach.")
+            return self.joints
 
-    def ee(self):
-        return self.fk_points()[-1]
+        # J1: 베이스 회전
+        j1 = np.degrees(np.arctan2(dy, dx))
 
+        # 평면 거리
+        r = np.sqrt(dx**2 + dy**2)
+        h = dz
+
+        d = np.sqrt(r**2 + h**2)
+        d = np.clip(d, 1e-6, max_reach)
+
+        # 삼각형 계산 (NaN 방지용 클램프)
+        val2 = (self.L1**2 + d**2 - self.L2**2) / (2 * self.L1 * d)
+        val3 = (self.L1**2 + self.L2**2 - d**2) / (2 * self.L1 * self.L2)
+        val2 = np.clip(val2, -1.0, 1.0)
+        val3 = np.clip(val3, -1.0, 1.0)
+
+        a1 = np.arctan2(h, r)
+        a2 = np.arccos(val2)
+        a3 = np.arccos(val3)
+
+        j2 = np.degrees(a1 + a2)
+        j3 = np.degrees(np.pi - a3)
+
+        # Wrist 각도 (스크린 평면에 수직 정렬)
+        j4 = -(j2 + j3 - 90)
+        j5 = 0.0
+
+        self.joints = [j1, j2 - 90, -(j3 - 90), j4, j5]
+        self.update_end_effector()
+
+        # ===== 보정 =====
+        dz_error = self.end_effector[2] - z
+        if abs(dz_error) > 0.1:
+            correction = np.degrees(np.arctan2(dz_error, self.L2 + self.L3))
+            self.joints[1] -= correction
+            self.update_end_effector()
+
+        # NaN 발생 방지: 모든 joint 값 유효화
+        self.joints = [0 if np.isnan(j) else j for j in self.joints]
+        return self.joints
+
+    # =========================
+    # EE 갱신
+    # =========================
+    def update_end_effector(self):
+        pts = self.forward_kinematics()
+        self.end_effector = np.array(pts[-1])
+
+    # =========================
+    # 서보 각도 변환
+    # =========================
+    def get_servo_angles(self):
+        servo_angles = []
+        for i, val in enumerate(self.joints):
+            sim_min, sim_max, real_min, real_max = self.servo_map[i]
+            val = np.clip(val, sim_min, sim_max)
+            mapped = np.interp(val, [sim_min, sim_max], [real_min, real_max])
+            servo_angles.append(int(mapped))
+        return servo_angles
