@@ -13,11 +13,11 @@ def normalize_deg(a: float) -> float:
 class RobotArm:
     def __init__(self):
         self.base = np.array([0.0, 0.0, 20.0])  # J2 회전축 위치
-        self.L1, self.L2, self.L3 = 60.0, 80.0, 70.0
-        self.joints = [0.0, 0.0, 0.0, 0.0, 0.0]  # [J1,J2,J3,J4,J5] (deg, sim)
+        self.L1, self.L2, self.L3 = 80.0, 80.0, 70.0
+        self.joints = [0.0, 0.0, 0.0, 0.0, 0.0]  # [J1,J2,J3,J4,J5] (deg, 물리각)
         self.end_effector = np.array([0.0, 0.0, 0.0])
 
-        # (sim_min, sim_max, real_min, real_max)
+        # (sim_min, sim_max, real_min, real_max) — 실기 전송용(그대로 유지)
         self.servo_map = {
             0: (-180, 180, 0, 360),
             1: (-90, 10, 120, 20),
@@ -27,9 +27,39 @@ class RobotArm:
         }
         self.sim_limits = {i: (v[0], v[1]) for i, v in self.servo_map.items()}
 
-    # =========================
-    # 순기구학 (FK) — 누적 피치: s2=J2+J3, s3=s2+J4
-    # =========================
+        # IK 전용 각도 제한(물리각 기준). 필요 시 set_ik_limits()로 변경 가능
+        self.ik_limits = {
+            'J1': (-180.0, 180.0),
+            'J2': (0.0, 90.0),
+            'J3': (-10, 120.0),
+            'J4': (-10, 120.0),
+            'J5': (-90.0, 90.0),
+        }
+
+        # === 안전 최소 높이(EE가 절대 내려가지 않을 Z) ===
+        # 기본값은 베이스 상단(=20). main.py에서 화면 적용 시 screenZ0로 설정 권장.
+        self.min_ee_z = float(self.base[2])
+
+    def set_ik_limits(self, **kwargs):
+        """예: set_ik_limits(J2=(5,80), J4=(-45,45)) — 물리각 기준.
+        주어진 키만 업데이트."""
+        for k, v in kwargs.items():
+            if k in self.ik_limits and isinstance(v, (list, tuple)) and len(v) == 2:
+                lo, hi = float(v[0]), float(v[1])
+                if lo > hi:
+                    lo, hi = hi, lo
+                self.ik_limits[k] = (lo, hi)
+
+    def _clamp_ik(self, name, val):
+        lo, hi = self.ik_limits[name]
+        return clamp(val, lo, hi)
+
+    # 안전 최소 높이 설정 API
+    def set_min_ee_z(self, z: float):
+        """EE의 최소 높이(Z)를 설정. 화면 평면 Z(screenZ0)로 맞춰 호출 권장."""
+        self.min_ee_z = max(0.0, float(z))
+        return self.min_ee_z
+
     def forward_kinematics(self):
         j1, j2, j3, j4, j5 = np.radians(self.joints)
         x0, y0, z0 = self.base
@@ -71,67 +101,83 @@ class RobotArm:
     #   4) 남은 L3로 T를 맞추는 s3 계산 → J4 = s3 - (J2+J3)
     # =========================
     def inverse_kinematics(self, x, y, z):
-        """
-        IK (서보 맵/보정 무시):
-        - 각도 정의를 FK와 1:1 일치(모두 '물리각')
-          J2 = 어깨 절대 피치(0°=+Z 정위치, 90°=수평)
-          J3 = 팔꿈치 절대 추가 피치(누적: s2 = J2+J3)
-          J4 = 손목 절대 추가 피치(누적: s3 = J2+J3+J4)
-        - 목표점 T(x,y,z)을 정확히 위치 일치
-        """
-        # 1) 제약: EE는 바닥 아래로 가지 않음
-        z = max(0.0, float(z))
+        """IK (물리각 기준, 서보맵 무시) + 각 관절 제한 적용 + 안전높이 보장."""
+        # 0) 타겟 Z를 안전높이 이상으로 끌어올림
+        z_req = max(float(z), getattr(self, 'min_ee_z', 0.0), 0.0)
+        dx, dy, dz = float(x) - self.base[0], float(y) - self.base[1], z_req - self.base[2]
+        prev = list(self.joints)  # 롤백 대비
 
-        # 2) Yaw (J1) — 360° 전범위 + 연속성 보장(현재 각도에 가장 가까운 해 선택)
-        dx, dy, dz = float(x) - self.base[0], float(y) - self.base[1], z - self.base[2]
-        j1_full = (np.degrees(np.arctan2(dy, dx)) + 360.0) % 360.0  # [0,360)
-        # 후보 3개: j1_full-360, j1_full, j1_full+360 → 현재 각과 가장 가까운 해 선택
+        # --- J1: 360° 연속성 보장 + 제한 ---
+        j1_full = (np.degrees(np.arctan2(dy, dx)) + 360.0) % 360.0
         cur = float(self.joints[0]) if hasattr(self, 'joints') else 0.0
         cands = [j1_full - 360.0, j1_full, j1_full + 360.0]
         j1_sel = min(cands, key=lambda a: abs(((a - cur + 180) % 360) - 180))
-        j1 = normalize_deg(j1_sel)  # 내부 저장은 [-180,180) 유지
+        j1 = normalize_deg(j1_sel)
+        j1 = self._clamp_ik('J1', j1)
 
-        # 수직평면 좌표 (r: 반경, h: 높이)
+        # 수직평면 좌표
         r = np.hypot(dx, dy)
         h = dz
 
-        # 3) 손목점 W = T - L3 * u (u = (r,h)/||T||)
-        d = max(np.hypot(r, h), 1e-9)
-        ur, uh = r/d, h/d
-        rw, hw = r - self.L3*ur, h - self.L3*uh
+        # --- 손목점/2링크/손목 각도: 일관 수렴 루프 ---
+        r = float(r); h = float(h)
+        h_target = max(dz, (self.min_ee_z - self.base[2]))
 
-        # 4) 2링크 IK (L1, L2)로 W 맞춤 — 모든 각도는 '물리각' 기준
-        d_w = np.hypot(rw, hw)
-        max12 = self.L1 + self.L2 - 1e-9
-        if d_w > max12:
-            scale = max12 / d_w
-            rw *= scale; hw *= scale; d_w = max12
+        def solve_2link(rw, hw):
+            d_w = np.hypot(rw, hw)
+            max12 = self.L1 + self.L2 - 1e-9
+            if d_w > max12:
+                scale = max12 / d_w
+                rw *= scale; hw *= scale; d_w = max12
+            c2 = np.clip((self.L1**2 + d_w**2 - self.L2**2) / (2*self.L1*d_w), -1.0, 1.0)
+            c3 = np.clip((self.L1**2 + self.L2**2 - d_w**2) / (2*self.L1*self.L2), -1.0, 1.0)
+            beta  = np.arctan2(rw, hw)
+            alpha = np.arccos(c2)
+            theta2 = beta - alpha
+            j2p = np.degrees(theta2)
+            j2p = self._clamp_ik('J2', j2p)
+            gamma = np.arccos(c3)
+            s2r = np.radians(j2p) + (np.pi - gamma)
+            j3p = np.degrees(s2r) - j2p
+            j3p = self._clamp_ik('J3', j3p)
+            s2r = np.radians(j2p + j3p)
+            return j2p, j3p, s2r
 
-        # (a) 어깨: β=atan2(rw, hw) (from +Z), α=acos(c2), θ2=β−α (elbow-down)
-        c2 = np.clip((self.L1**2 + d_w**2 - self.L2**2) / (2*self.L1*d_w), -1.0, 1.0)
-        c3 = np.clip((self.L1**2 + self.L2**2 - d_w**2) / (2*self.L1*self.L2), -1.0, 1.0)
-        beta = np.arctan2(rw, hw)
-        alpha = np.arccos(c2)
-        theta2 = beta - alpha                      # rad
-        j2_phys = np.degrees(theta2)               # deg (0=up, 90=horizontal)
-        j2_phys = clamp(j2_phys, 0.0, 90.0)
+        # 초기 Wrist는 타겟 방향으로 L3만큼 뒤로
+        d = max(np.hypot(r, h_target), 1e-9)
+        ur, uh = r/d, h_target/d
+        rw, hw = r - self.L3*ur, h_target - self.L3*uh
 
-        # (b) 팔꿈치: γ=acos(c3) (내각), L2 절대 각 = θ2 + (π − γ)
-        gamma = np.arccos(c3)
-        s2 = theta2 + (np.pi - gamma)
-        j3_phys = np.degrees(s2) - j2_phys        # 추가 피치 (물리각 정의)
+        j2_phys = j3_phys = 0.0
+        s2 = 0.0
+        j4_phys = 0.0
+        for _ in range(5):  # 소규모 2회 수렴이면 충분
+            # (1) 2링크로 Wrist 맞춤
+            j2_phys, j3_phys, s2 = solve_2link(rw, hw)
+            # (2) Z를 정확히 맞추는 s3 계산
+            r2 = self.L1*np.sin(np.radians(j2_phys)) + self.L2*np.sin(s2)
+            h2 = self.L1*np.cos(np.radians(j2_phys)) + self.L2*np.cos(s2)
+            cos_s3 = np.clip((h_target - h2) / max(self.L3, 1e-9), -1.0, 1.0)
+            s3_abs = np.arccos(cos_s3)
+            # r 오차가 작은 부호 선택
+            def r_err(s3):
+                return abs((r2 + self.L3*np.sin(s3)) - r)
+            s3 = s3_abs if r_err(s3_abs) <= r_err(-s3_abs) else -s3_abs
+            j4_phys = np.degrees(s3) - (j2_phys + j3_phys)
+            j4_phys = self._clamp_ik('J4', j4_phys)
+            # (3) s3로 재정의된 Wrist로 업데이트하여 다음 반복 시 2링크를 일관되게 맞춤
+            rw = r - self.L3*np.sin(np.radians(j2_phys + j3_phys + j4_phys))
+            hw = h_target - self.L3*np.cos(np.radians(j2_phys + j3_phys + j4_phys))
 
-        # 5) 손목: Z를 정확히 맞추고 r도 정합 — s3 = atan2(dr, dh)
-        r2 = self.L1*np.sin(np.radians(j2_phys)) + self.L2*np.sin(s2)
-        h2 = self.L1*np.cos(np.radians(j2_phys)) + self.L2*np.cos(s2)
-        dr, dh = r - r2, h - h2
-        s3 = np.arctan2(dr, dh)
-        j4_phys = np.degrees(s3) - (j2_phys + j3_phys)
+        # J5는 회전만: 기본 0, 제한 적용
+        j5_phys = self._clamp_ik('J5', 0.0)
 
-        # 6) 결과 반영 (모두 '물리각') — 서보맵/보정 무시
-        j5_phys = 0.0
         self.joints = [j1, j2_phys, j3_phys, j4_phys, j5_phys]
         self.update_end_effector()
+        # 최종 안전 확인: EE가 안전 높이 아래로 내려가면 이전 자세로 롤백
+        if self.end_effector[2] < self.min_ee_z - 1e-6:
+            self.joints = prev
+            self.update_end_effector()
         return self.joints
         # end IK
         
