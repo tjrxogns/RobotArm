@@ -43,7 +43,7 @@ class RobotArmViewer(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("로봇팔 3D 뷰어 (251011)")
-        self.setGeometry(0, 0, 1200, 700)
+        self.setGeometry(0, 0, 800, 500)
 
         self.robot = RobotArm()
         self.serial = SerialComm()
@@ -95,28 +95,52 @@ class RobotArmViewer(QMainWindow):
 
         xyz_label = QLabel("<b>엔드이펙터 XYZ 제어</b>"); right_layout.addWidget(xyz_label)
         self.sliders = {}
+        xyz_row_sliders = QHBoxLayout()
         for axis in ["X","Y","Z"]:
-            hl=QHBoxLayout(); lbl=QLabel(f"{axis}:"); sld=QSlider(Qt.Horizontal)
-            sld.setRange(-200,200); sld.setValue(0); sld.setTracking(True)
+            sub = QHBoxLayout()
+            lbl = QLabel(f"{axis}:")
+            sld = QSlider(Qt.Horizontal)
+            sld.setRange(-200, 200)
+            sld.setValue(0)
+            sld.setTracking(True)
             sld.valueChanged.connect(self.update_from_xyz)
             sld.sliderReleased.connect(self.update_from_xyz)
-            hl.addWidget(lbl); hl.addWidget(sld); right_layout.addLayout(hl)
-            self.sliders[axis]=sld
+            sub.addWidget(lbl)
+            sub.addWidget(sld)
+            wrap = QWidget(); wrap.setLayout(sub)
+            xyz_row_sliders.addWidget(wrap)
+            self.sliders[axis] = sld
+            right_layout.addLayout(xyz_row_sliders)
 
-        joint_label = QLabel("<b>Joint 제어 (서보 각도 표시)</b>"); right_layout.addWidget(joint_label)
+        joint_label = QLabel("<b>Joint 제어 (서보 각도 / 물리각)</b>"); right_layout.addWidget(joint_label)
         self.joint_sliders={}; self.joint_labels={}
+        self.joint_physical_labels = {}   # ← 이 줄 추가
         for i in range(5):
-            hl=QHBoxLayout(); lbl=QLabel(f"J{i+1}:"); sld=QSlider(Qt.Horizontal)
-            sld.setRange(-90,90); sld.setValue(0); sld.setTracking(True)
+            hl = QHBoxLayout()
+            lbl = QLabel(f"J{i+1}:")
+            sld = QSlider(Qt.Horizontal)
+
+            # ✅ servo_map의 시뮬레이터 범위를 사용 (물리각 범위)
+            sim_min, sim_max, _, _ = self.robot.servo_map[i]
+            sld.setRange(int(sim_min), int(sim_max))
+
+            sld.setValue(0)
+            sld.setTracking(True)
             sld.valueChanged.connect(self.update_from_joints)
             sld.sliderReleased.connect(self.update_from_joints)
-            lbl_ang=QLabel("0°"); lbl_ang.setFixedWidth(60)
+
+            lbl_ang  = QLabel("0°");  lbl_ang.setFixedWidth(60)
+            lbl_phys = QLabel("(0°)"); lbl_phys.setFixedWidth(60)
             btn_send_one = QPushButton("▶")
             btn_send_one.setFixedWidth(30)
             btn_send_one.clicked.connect(lambda _, idx=i: self.send_single_joint(idx))
-            hl.addWidget(lbl); hl.addWidget(sld); hl.addWidget(lbl_ang); hl.addWidget(btn_send_one)
+
+            hl.addWidget(lbl); hl.addWidget(sld); hl.addWidget(lbl_ang); hl.addWidget(lbl_phys); hl.addWidget(btn_send_one)
             right_layout.addLayout(hl)
-            self.joint_sliders[i]=sld; self.joint_labels[i]=lbl_ang
+
+            self.joint_sliders[i] = sld
+            self.joint_labels[i] = lbl_ang
+            self.joint_physical_labels[i] = lbl_phys
 
         form = QFormLayout()
         self.ed_screenX0, self.ed_screenY0, self.ed_screenZ0 = QLineEdit(str(self.screenX0)), QLineEdit(str(self.screenY0)), QLineEdit(str(self.screenZ0))
@@ -129,8 +153,11 @@ class RobotArmViewer(QMainWindow):
         xyz_lay.addWidget(QLabel("Y0")); xyz_lay.addWidget(self.ed_screenY0)
         xyz_lay.addWidget(QLabel("Z0")); xyz_lay.addWidget(self.ed_screenZ0)
         form.addRow(QLabel("Screen XYZ"), xyz_row)
-        form.addRow("screenW", self.ed_screenW)
-        form.addRow("screenH", self.ed_screenH)
+        size_row = QWidget(); size_lay = QHBoxLayout(size_row)
+        size_lay.setContentsMargins(0,0,0,0); size_lay.setSpacing(6)
+        size_lay.addWidget(QLabel("W")); size_lay.addWidget(self.ed_screenW)
+        size_lay.addWidget(QLabel("H")); size_lay.addWidget(self.ed_screenH)
+        form.addRow(QLabel("Screen Size"), size_row)
         btn_apply = QPushButton("터치스크린 적용"); btn_apply.clicked.connect(self.apply_screen)
         right_layout.addLayout(form); right_layout.addWidget(btn_apply)
 
@@ -205,7 +232,11 @@ class RobotArmViewer(QMainWindow):
         for s in list(self.sliders.values())+list(self.joint_sliders.values()): s.blockSignals(state)
 
     def sync_joint_sliders(self):
-        for i in range(5): self.joint_sliders[i].setValue(int(self.robot.joints[i]))
+        for i in range(5):
+            v = float(self.robot.joints[i])
+            sim_min, sim_max, _, _ = self.robot.servo_map[i]
+            v = min(max(v, sim_min), sim_max)  # clamp
+            self.joint_sliders[i].setValue(int(v))
 
     def sync_xyz_sliders(self):
         x, y, z = self.robot.end_effector
@@ -214,8 +245,16 @@ class RobotArmViewer(QMainWindow):
         self.sliders['Z'].setValue(int(z))
 
     def update_servo_labels(self):
-        angs=self.robot.get_servo_angles()
-        for i,a in enumerate(angs): self.joint_labels[i].setText(f"{a}°")
+        """서보각 라벨과 물리각(계산용) 라벨을 동기화한다."""
+        angs = self.robot.get_servo_angles() if hasattr(self.robot, 'get_servo_angles') else []
+        # 로봇 모델의 joints가 항상 최신이 아닐 수 있어, 안전하게 슬라이더 값으로도 보조한다.
+        for i in range(5):
+            servo_ang = angs[i] if i < len(angs) else int(self.joint_sliders[i].value())
+            # 물리각: 우선 robot.joints, 없거나 0으로만 유지되면 슬라이더 값으로 대체
+            phys_src = getattr(self.robot, 'joints', None)
+            phys_ang = float(phys_src[i]) if (phys_src is not None) else float(self.joint_sliders[i].value())
+            self.joint_labels[i].setText(f"{servo_ang}°")
+            self.joint_physical_labels[i].setText(f"({phys_ang:.1f}°)")
 
     def send_to_robot(self): self.serial.send_angles(self.robot.get_servo_angles())
 
@@ -244,15 +283,21 @@ class RobotArmViewer(QMainWindow):
         self.ax.scatter([ee_pos[0]],[ee_pos[1]],[ee_pos[2]], color='red', s=50)
         jdeg = self.robot.joints
         bx, by, bz = self.robot.base
-        self.ax.text(bx,by,bz + 10, f"J1 {jdeg[0]:.1f}°", fontsize=8)
-        self.ax.text(j2_pos[0],j2_pos[1],j2_pos[2] + 8, f"J2 {jdeg[1]:.1f}°", fontsize=8)
-        self.ax.text(j3_pos[0],j3_pos[1],j3_pos[2] + 8, f"J3 {jdeg[2]:.1f}°", fontsize=8)
-        self.ax.text(j4_pos[0],j4_pos[1],j4_pos[2] + 8, f"J4 {jdeg[3]:.1f}°", fontsize=8)
-        self.ax.text(ee_pos[0],ee_pos[1],ee_pos[2] + 12, f"J5 {jdeg[4]:.1f}°", fontsize=8)
+        phys = self.robot.joints                      # 물리각(계산용)
+        servo = self.robot.get_servo_angles()         # 서보각(전송용)
+        self.ax.text(bx, by, bz + 10,               f"J1 {phys[0]:.1f}° | S1 {servo[0]}°", fontsize=8)
+        self.ax.text(j2_pos[0], j2_pos[1], j2_pos[2] + 8,  f"J2 {phys[1]:.1f}° | S2 {servo[1]}°", fontsize=8)
+        self.ax.text(j3_pos[0], j3_pos[1], j3_pos[2] + 8,  f"J3 {phys[2]:.1f}° | S3 {servo[2]}°", fontsize=8)
+        self.ax.text(j4_pos[0], j4_pos[1], j4_pos[2] + 8,  f"J4 {phys[3]:.1f}° | S4 {servo[3]}°", fontsize=8)
+        self.ax.text(ee_pos[0], ee_pos[1], ee_pos[2] + 12, f"J5 {phys[4]:.1f}° | S5 {servo[4]}°", fontsize=8)
         self.ax.text(ee_pos[0], ee_pos[1], ee_pos[2] + 5, f"EE ({ee_pos[0]:.1f}, {ee_pos[1]:.1f}, {ee_pos[2]:.1f})", fontsize=8)
         if hasattr(self, 'lbl_ee'):
             self.lbl_ee.setText(f"EE: ({ee_pos[0]:.1f}, {ee_pos[1]:.1f}, {ee_pos[2]:.1f})")
         self.draw_touch_screen()
+
+        if hasattr(self, 'joint_labels') and hasattr(self, 'joint_physical_labels'):
+            self.update_servo_labels()
+
         if self.clicked_xy is not None:
             cx, cy = self.clicked_xy; self.ax.scatter([cx],[cy],[self.screenZ0],color='magenta',s=60)
         lim=220
