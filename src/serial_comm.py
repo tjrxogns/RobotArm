@@ -1,66 +1,68 @@
-import serial
-import time
-import serial.tools.list_ports
+from PySide6.QtCore import QObject, Signal
+import serial, serial.tools.list_ports, time, threading
 
-class SerialComm:
-    def __init__(self, port=None, baudrate=9600, timeout=1):
+class SerialComm(QObject):
+    # ✅ 상태회신 시그널 정의
+    status_received = Signal(list)  # e.g. [90,45,130,85,95]
+
+    def __init__(self):
+        super().__init__()
         self.ser = None
-        self.port = port
-        self.baudrate = baudrate
-        self.timeout = timeout
-
-    def connect(self, port=None):
-        if port:
-            self.port = port
-        if not self.port:
-            print("[Serial] 포트가 지정되지 않았습니다.")
-            return False
-        try:
-            self.ser = serial.Serial(self.port, baudrate=self.baudrate, timeout=self.timeout)
-            time.sleep(2)
-            print(f"[Serial] Connected to {self.port} ({self.baudrate}bps)")
-            return True
-        except serial.SerialException as e:
-            print(f"[Serial] 연결 실패: {e}")
-            self.ser = None
-            return False
-
-    def send_angle(self, servo_id: int, angle: int):
-        if not self.ser:
-            print("[Serial] 포트 미연결 상태")
-            return
-        cmd = f"{servo_id} {angle}\n"
-        self.ser.write(cmd.encode())
-        print(f"[TX] {cmd.strip()}")
-
-    def send_angles(self, angles):
-        if not self.ser:
-            print("[Serial] 포트 미연결 상태")
-            return
-        for i, ang in enumerate(angles, start=1):
-            self.send_angle(i, int(ang))
-            time.sleep(0.05)
-        print("[Serial] 모든 서보 전송 완료")
-
-    def request_status(self):
-        if self.ser:
-            self.ser.write(b'P\n')
-            print("[TX] P (상태 요청)")
-
-    def read_line(self):
-        if self.ser and self.ser.in_waiting:
-            line = self.ser.readline().decode(errors='ignore').strip()
-            if line:
-                print(f"[RX] {line}")
-            return line
-        return None
-
-    def close(self):
-        if self.ser and self.ser.is_open:
-            self.ser.close()
-            print("[Serial] Closed")
+        self.running = False
+        self.thread = None
 
     @staticmethod
     def list_ports():
-        ports = serial.tools.list_ports.comports()
-        return [port.device for port in ports]
+        return [p.device for p in serial.tools.list_ports.comports()]
+
+    def connect(self, port, baud=115200):
+        try:
+            self.ser = serial.Serial(port, baud, timeout=0.05)
+            self.running = True
+            # ✅ Python thread로 read_loop 실행
+            self.thread = threading.Thread(target=self.read_loop, daemon=True)
+            self.thread.start()
+            return True
+        except Exception as e:
+            print("Serial connect error:", e)
+            return False
+
+    def read_loop(self):
+        buffer = ""
+        print("🔵 Serial read loop started")
+        while self.running and self.ser and self.ser.is_open:
+            try:
+                if self.ser.in_waiting:
+                    ch = self.ser.read().decode(errors="ignore")
+                    if ch == "\n":
+                        line = buffer.strip()
+                        buffer = ""
+                        if line:
+                            print("RX:", line)
+                            if line.startswith("@"):
+                                try:
+                                    vals = [int(v) for v in line[1:].split(",")]
+                                    print("✅ 상태회신 수신:", vals)
+                                    self.status_received.emit(vals)
+                                except Exception as e:
+                                    print("Parse error:", e)
+                    else:
+                        buffer += ch
+                else:
+                    time.sleep(0.01)
+            except Exception as e:
+                print("Serial read error:", e)
+                time.sleep(0.1)
+
+    def send_command(self, text):
+        if self.ser and self.ser.is_open:
+            msg = text.strip() + "\n"
+            self.ser.write(msg.encode())
+            print("TX:", msg.strip())
+
+    def close(self):
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=1)
+        if self.ser and self.ser.is_open:
+            self.ser.close()

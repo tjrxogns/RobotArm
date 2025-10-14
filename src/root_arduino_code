@@ -1,0 +1,108 @@
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(0x40);
+
+int servoCount = 5;
+int angles[5] = {90, 90, 150, 90, 90};
+bool servoEnabled[5] = {true, true, true, true, true};
+
+int servoMinAngle[5] = {30, 10, 30, 0, 0};
+int servoMaxAngle[5] = {150, 120, 160, 180, 180};
+
+unsigned long lastSend = 0;
+
+int angleToUS(int ang) {
+  return map(ang, 0, 180, 732, 2930);
+}
+
+void setServoAngle(int i, int angle) {
+  if (!servoEnabled[i]) return;
+  angle = constrain(angle, servoMinAngle[i], servoMaxAngle[i]);
+  angles[i] = angle;
+  pwm.writeMicroseconds(i, angleToUS(angle));
+}
+
+void disableServo(int i) {
+  servoEnabled[i] = false;
+  pwm.writeMicroseconds(i, 0);
+}
+
+void enableServo(int i) {
+  servoEnabled[i] = true;
+}
+
+void setup() {
+  Serial.begin(115200);
+  pwm.begin();
+  pwm.setPWMFreq(50);
+
+  // 초기화 순서: 1번(두번째) → 0번(첫번째) → 2번(세번째) → 4번(다섯번째)
+  int initOrder[] = {1, 0, 2, 3};
+
+  for (int i = 0; i < 4; i++) {
+    int idx = initOrder[i];
+    setServoAngle(idx, angles[idx]);
+    delay(500);  // 0.5초 간격
+  }
+
+  delay(2000);  // 0.5초 간격
+  for (int i = 0; i < servoCount; i++) disableServo(i);
+  Serial.println("READY");
+}
+
+void loop() {
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+
+    if (cmd.startsWith("ALL")) {
+      int idx = 0;
+      int lastSpace = 3;
+      for (int i = 0; i < servoCount; i++) {
+        int nextSpace = cmd.indexOf(' ', lastSpace + 1);
+        String val = (nextSpace == -1) ? cmd.substring(lastSpace + 1)
+                                       : cmd.substring(lastSpace + 1, nextSpace);
+        if (val.length() > 0) {
+          int ang = val.toInt();
+          enableServo(i);
+          setServoAngle(i, ang);
+        }
+        if (nextSpace == -1) break;
+        lastSpace = nextSpace;
+      }
+    }
+
+    else if (cmd.startsWith("Disable")) {
+      if (cmd.endsWith("All")) {
+        for (int i = 0; i < servoCount; i++) disableServo(i);
+      } else {
+        int id = cmd.substring(8).toInt();
+        if (id >= 0 && id < servoCount) disableServo(id);
+      }
+    }
+
+    else {
+      int space = cmd.indexOf(' ');
+      if (space > 0) {
+        int id = cmd.substring(0, space).toInt();
+        int ang = cmd.substring(space + 1).toInt();
+        if (id >= 0 && id < servoCount) {
+          enableServo(id);
+          setServoAngle(id, ang);
+        }
+      }
+    }
+  }
+
+  if (millis() - lastSend > 500) {  // 0.1초마다 한 번
+    lastSend = millis();
+    Serial.print("@");
+    for (int i = 0; i < servoCount; i++) {
+      Serial.print(angles[i]);
+      if (i < servoCount - 1) Serial.print(",");
+    }
+  }
+  Serial.println();
+  delay(100);
+}

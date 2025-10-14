@@ -37,6 +37,32 @@ class RobotArm:
             'J5': (-90.0, 90.0),
         }
 
+    def set_servo_angles(self, angles):
+        """외부에서 상태회신 각도를 받아 로봇 모델에 반영 (보정 포함)"""
+        if len(angles) != len(self.joints):
+            return
+
+        for i, ang in enumerate(angles):
+            sim_min, sim_max, real_min, real_max = self.servo_map[i]
+
+            # 🔹 1. 방향 자동 판별 (기존 로직 유지)
+            if (real_max - real_min) * (sim_max - sim_min) > 0:
+                sim_angle = np.interp(ang, [real_min, real_max], [sim_min, sim_max])
+            else:
+                sim_angle = np.interp(ang, [real_max, real_min], [sim_min, sim_max])
+
+            # 🔹 2. 특정 축 보정 (시뮬레이터 0점 차이 보정)
+            if i == 0:
+                sim_angle -= 90   # J1 보정 (0~360 → -180~180 중심 맞추기)
+            elif i == 2:
+                sim_angle -= 45   # J3 보정 (180↔140 범위 차이 중간값 보정)
+
+            self.joints[i] = sim_angle
+
+        self.update_end_effector()
+
+
+
         # === 안전 최소 높이(EE가 절대 내려가지 않을 Z) ===
         # 기본값은 베이스 상단(=20). main.py에서 화면 적용 시 screenZ0로 설정 권장.
         self.min_ee_z = float(self.base[2])
