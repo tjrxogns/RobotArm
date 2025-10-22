@@ -62,18 +62,34 @@ class RobotArmViewer(QMainWindow):
         self.last_update_time = 0
 
         self.init_ui()
-        self.update_view()
+        self.enable_text_selection(self)
+
+    def enable_text_selection(self, widget):
+        """모든 하위 위젯의 텍스트를 복사 가능하게 설정 (화면 모양 변화 없음)"""
+        from PySide6.QtWidgets import QWidget
+        for child in widget.findChildren(QWidget):
+            if hasattr(child, "setTextInteractionFlags"):
+                try:
+                    child.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                except Exception:
+                    pass
+            self.enable_text_selection(child)
 
     def init_ui(self):
-        main_widget = QWidget(); self.setCentralWidget(main_widget)
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
         main_layout = QHBoxLayout(main_widget)
 
-        left_frame = QFrame(); left_layout = QVBoxLayout(left_frame)
-        self.fig = Figure(); self.canvas = FigureCanvas(self.fig)
+        left_frame = QFrame()
+        left_layout = QVBoxLayout(left_frame)
+        self.fig = Figure()
+        self.canvas = FigureCanvas(self.fig)
         self.ax = self.fig.add_subplot(111, projection='3d')
-        left_layout.addWidget(self.canvas); main_layout.addWidget(left_frame, stretch=2)
+        left_layout.addWidget(self.canvas)
+        main_layout.addWidget(left_frame, stretch=2)
 
-        right_frame = QFrame(); right_frame.setFixedWidth(420)
+        right_frame = QFrame()
+        right_frame.setFixedWidth(420)
         right_layout = QVBoxLayout(right_frame)
 
         # === 시리얼 포트 ===
@@ -227,10 +243,21 @@ class RobotArmViewer(QMainWindow):
         tx = self.screenX0 + self.screenW * rel_x
         ty = self.screenY0 + self.screenH * rel_y
         tz = self.screenZ0
-        self.clicked_xy = (tx, ty)
-        self.lbl_click.setText(f"터치: ({tx:.1f}, {ty:.1f}) @Z={tz:.1f}")
-        self.robot.inverse_kinematics(tx, ty, tz)
+
+        u, v, z = tx, ty, self.screenZ0
+        wx, wy, wz = self.robot.map_touch_to_world(u, v, z)
+        self.clicked_xy = (u, v)
+        # 터치 좌표 (u,v,z) → 로봇 월드 좌표 변환
+        self.clicked_xy = (u, v)
+        self.lbl_click.setText(
+        f"터치 목표: ({u:.1f}, {v:.1f}, {z:.1f})"
+        f"    → EE 실제: ({wx:.1f}, {wy:.1f}, {wz:.1f})"
+        )
+
+        # 변환된 좌표를 IK에 전달
+        self.robot.inverse_kinematics(wx, wy, wz)
         self.update_all()
+
 
     def apply_screen(self):
         self.screenX0 = float(self.ed_screenX0.text())
@@ -238,7 +265,25 @@ class RobotArmViewer(QMainWindow):
         self.screenZ0 = float(self.ed_screenZ0.text())
         self.screenW = float(self.ed_screenW.text())
         self.screenH = float(self.ed_screenH.text())
-        self.robot.set_min_ee_z(self.screenZ0)
+        w = max(self.touch_sim.width(), 1)
+        h = max(self.touch_sim.height(), 1)
+        self.robot.set_screen_calibration(
+            origin=[self.screenX0, self.screenY0, self.screenZ0],
+            u_axis=[1, 0, 0],
+            v_axis=[0, 1, 0],
+            su=self.screenW / w,
+            sv=self.screenH / h,
+            lock_z_to_plane=True
+        )
+        # ✅ 디버그 출력: 스크린 평면 벡터와 보정 행렬 확인
+        print("─" * 60)
+        print(f"[apply_screen] Origin = ({self.screenX0:.2f}, {self.screenY0:.2f}, {self.screenZ0:.2f})")
+        print(f"U_axis = {self.robot.screen_u}, V_axis = {self.robot.screen_v}")
+        print(f"Normal = {self.robot.screen_normal}")
+        print(f"R_screen_to_world =\n{self.robot.R_screen_to_world}")
+        print(f"Scale su, sv = {self.robot.su:.4f}, {self.robot.sv:.4f}")
+        print("─" * 60)
+            # ✅ 화면 반영 (시각 갱신)
         self.update_view()
 
     def update_from_xyz(self):
@@ -280,7 +325,7 @@ class RobotArmViewer(QMainWindow):
         self.ax.text(j3_pos[0], j3_pos[1], j3_pos[2] + 8, f"2 {jdeg[2]:.1f}° | S2 {servo[2]}°", fontsize=8)
         self.ax.text(j4_pos[0], j4_pos[1], j4_pos[2] + 8, f"3 {jdeg[3]:.1f}° | S3 {servo[3]}°", fontsize=8)
         self.ax.text(ee_pos[0], ee_pos[1], ee_pos[2] + 10, f"4 {jdeg[4]:.1f}° | S4 {servo[4]}°", fontsize=8)
-        self.ax.text(ee_pos[0], ee_pos[1], ee_pos[2] + 5, f"EE ({ee_pos[0]:.1f},{ee_pos[1]:.1f},{ee_pos[2]:.1f})", fontsize=8)
+        #self.ax.text(ee_pos[0], ee_pos[1], ee_pos[2] + 5, f"EE ({ee_pos[0]:.1f},{ee_pos[1]:.1f},{ee_pos[2]:.1f})", fontsize=8)
 
         x0,y0,z0,w,h=self.screenX0,self.screenY0,self.screenZ0,self.screenW,self.screenH
         verts=[[(x0,y0,z0),(x0+w,y0,z0),(x0+w,y0+h,z0),(x0,y0+h,z0)]]
@@ -288,12 +333,21 @@ class RobotArmViewer(QMainWindow):
         self.ax.add_collection3d(poly)
         if self.clicked_xy is not None:
             cx,cy=self.clicked_xy; self.ax.scatter([cx],[cy],[self.screenZ0],color='magenta',s=60)
-        lim=220
-        self.ax.set_xlim(-lim,lim); self.ax.set_ylim(-lim/2,lim); self.ax.set_zlim(-lim/2,lim)
+        lim=200
+        self.ax.set_xlim(-lim/2,lim/2); self.ax.set_ylim(-10,lim); self.ax.set_zlim(-10,lim)
         self.ax.set_xlabel('X'); self.ax.set_ylabel('Y'); self.ax.set_zlabel('Z')
         views={'xy':(90,-90),'yz':(0,0),'zx':(0,90),'3d':(30,45)}
         elev,azim=views[self.view_mode]; self.ax.view_init(elev=elev,azim=azim)
+
+        self.robot.update_end_effector()  # EE 재계산
+        ee = self.robot.end_effector
+        x, y, z = ee
+        self.lbl_ee.setText(f"EE: ({x:.1f}, {y:.1f}, {z:.1f})")
+        
         self.canvas.draw_idle()
+
+
+
 
     def update_all(self):
         self.block_signals(True)
