@@ -46,7 +46,7 @@ class RobotArm:
             'J1': (-180.0, 180.0),  # J0(Yaw)
             'J2': (0.0, 90.0),      # J1(Shoulder)
             'J3': (0.0, 135.0),     # J2(Elbow)
-            'J4': (-90.0, 90.0),    # J3(Wrist Pitch)
+            'J4': (30, 90.0),    # J3(Wrist Pitch)
             'J5': (-90.0, 90.0),    # J4(Roll)
         }
 
