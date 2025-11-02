@@ -3,106 +3,212 @@
 
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(0x40);
 
-int servoCount = 5;
-int angles[5] = {90, 90, 150, 90, 90};
-bool servoEnabled[5] = {true, true, true, true, true};
+#define SMOOTH_STEPS   20     // 부드러운 이동 단계 수
+#define SMOOTH_TIME_MS 400   // 부드러운 이동 총 시간(ms)
 
-int servoMinAngle[5] = {30, 10, 30, 0, 0};
-int servoMaxAngle[5] = {150, 120, 160, 180, 180};
+const int servoCount = 5;
+int angles[servoCount] = {90, 110, 140, 40, 90};
+bool servoEnabled[servoCount] = {true, true, true, true, true};
 
-unsigned long lastSend = 0;
+int servoMinAngle[servoCount] = {30, 10, 30, 0, 0};
+int servoMaxAngle[servoCount] = {150, 120, 160, 180, 180};
 
+unsigned long lastCmdTime = 0;
+unsigned long lastStatusSend = 0;
+const unsigned long CMD_TIMEOUT = 60 * 1000;
+
+// ─────────────── Servo Utility ───────────────
 int angleToUS(int ang) {
   return map(ang, 0, 180, 732, 2930);
 }
 
-void setServoAngle(int i, int angle) {
-  if (!servoEnabled[i]) return;
+void setServoAngleInstant(int i, int angle) {  // 즉시 이동
+  if (i < 0 || i >= servoCount || !servoEnabled[i]) return;
   angle = constrain(angle, servoMinAngle[i], servoMaxAngle[i]);
   angles[i] = angle;
   pwm.writeMicroseconds(i, angleToUS(angle));
+
+  Serial.print("Servo "); Serial.print(i);
+  Serial.print(" → "); Serial.println(angle);
+}
+
+// 개별 서보 부드러운 이동 (단독 명령용)
+void setServoAngleSmooth(int i, int target) {
+  if (i < 0 || i >= servoCount || !servoEnabled[i]) return;
+  target = constrain(target, servoMinAngle[i], servoMaxAngle[i]);
+  int start = angles[i];
+  float step = (float)(target - start) / SMOOTH_STEPS;
+  int delayTime = SMOOTH_TIME_MS / SMOOTH_STEPS;
+
+  for (int s = 1; s <= SMOOTH_STEPS; s++) {
+    int newAngle = start + (int)(step * s);
+    pwm.writeMicroseconds(i, angleToUS(newAngle));
+    angles[i] = newAngle;
+    delay(delayTime);
+  }
+}
+
+// ─────────────── 모든 서보 동시 부드러운 이동 ───────────────
+void moveAllSmooth(int targetAngles[]) {
+  int start[servoCount];
+  float delta[servoCount];
+
+  for (int i = 0; i < servoCount; i++) {
+    start[i] = angles[i];
+    targetAngles[i] = constrain(targetAngles[i], servoMinAngle[i], servoMaxAngle[i]);
+    delta[i] = (float)(targetAngles[i] - start[i]) / SMOOTH_STEPS;
+  }
+
+  int delayTime = SMOOTH_TIME_MS / SMOOTH_STEPS;
+
+  for (int s = 1; s <= SMOOTH_STEPS; s++) {
+    for (int i = 0; i < servoCount; i++) {
+      if (!servoEnabled[i]) continue;
+      int newAngle = start[i] + (int)(delta[i] * s);
+      pwm.writeMicroseconds(i, angleToUS(newAngle));
+      angles[i] = newAngle;
+    }
+    delay(delayTime);
+  }
 }
 
 void disableServo(int i) {
+  if (i < 0 || i >= servoCount) return;
   servoEnabled[i] = false;
   pwm.writeMicroseconds(i, 0);
 }
 
 void enableServo(int i) {
+  if (i < 0 || i >= servoCount) return;
   servoEnabled[i] = true;
 }
 
+void disableAllServos() {
+  for (int i = 0; i < servoCount; i++) disableServo(i);
+  Serial.println("All servos disabled.");
+}
+
+void enableAllServos() {
+  for (int i = 0; i < servoCount; i++) enableServo(i);
+}
+
+// ─────────────── 시스템 부팅용 ───────────────
+void initialSetupInit() {
+  Serial.println("Initial setup start...");
+  int initOrder[] = {1, 0, 2, 3};
+  enableAllServos();
+  for (int i = 0; i < 4; i++) {
+    int idx = initOrder[i];
+    setServoAngleInstant(idx, angles[idx]);  // 빠르게 이동
+    delay(1000);
+  }
+  Serial.println("Initial setup complete.");
+}
+
+// ─────────────── EE 리프트 (상대 이동 + 즉시 이동) ───────────────
+void eeLiftInit() {
+  Serial.println("EE lift (relative, fast simultaneous) start...");
+
+  // Base(0), Roll(4)는 그대로 — Shoulder, Elbow, Wrist만 이동
+  int relativeDelta[servoCount] = {0, +20, -10, +15, 0};
+
+  enableAllServos();
+
+  // Shoulder, Elbow, Wrist 즉시 이동
+  for (int i = 1; i <= 3; i++) {
+    int target = angles[i] + relativeDelta[i];
+    target = constrain(target, servoMinAngle[i], servoMaxAngle[i]);
+    setServoAngleInstant(i, target);  // 최고 속도 즉시 이동
+  }
+
+  delay(300);  // 전체 완료 후 안정화 대기
+  Serial.println("EE lift complete (fast, base fixed).");
+}
+
+// ─────────────── Setup ───────────────
 void setup() {
   Serial.begin(115200);
   pwm.begin();
   pwm.setPWMFreq(50);
 
-  // 초기화 순서: 1번(두번째) → 0번(첫번째) → 2번(세번째) → 4번(다섯번째)
-  int initOrder[] = {1, 0, 2, 3};
-
-  for (int i = 0; i < 4; i++) {
-    int idx = initOrder[i];
-    setServoAngle(idx, angles[idx]);
-    delay(500);  // 0.5초 간격
-  }
-
-  delay(2000);  // 0.5초 간격
-  for (int i = 0; i < servoCount; i++) disableServo(i);
+  initialSetupInit();
+  delay(1000);
+  disableAllServos();
   Serial.println("READY");
+  lastCmdTime = millis();
 }
 
+// ─────────────── Main Loop ───────────────
 void loop() {
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
+    lastCmdTime = millis();
 
-    if (cmd.startsWith("ALL")) {
-      int idx = 0;
-      int lastSpace = 3;
-      for (int i = 0; i < servoCount; i++) {
-        int nextSpace = cmd.indexOf(' ', lastSpace + 1);
-        String val = (nextSpace == -1) ? cmd.substring(lastSpace + 1)
-                                       : cmd.substring(lastSpace + 1, nextSpace);
-        if (val.length() > 0) {
-          int ang = val.toInt();
-          enableServo(i);
-          setServoAngle(i, ang);
-        }
-        if (nextSpace == -1) break;
-        lastSpace = nextSpace;
+    // === STOP ===
+    if (cmd.equalsIgnoreCase("STOP")) {
+      disableAllServos();
+      Serial.println("STOP received → all servos disabled.");
+    }
+
+    // === ALL ===
+    else if (cmd.startsWith("ALL")) {
+      eeLiftInit();  // EE 빠르게 들어올림
+
+      enableAllServos();
+      int a[servoCount];
+      int parsed = sscanf(cmd.c_str(), "ALL %d %d %d %d %d",
+                          &a[0], &a[1], &a[2], &a[3], &a[4]);
+
+      if (parsed == servoCount) {
+        moveAllSmooth(a);  // 전체 동시 부드럽게 이동
+        Serial.println("OK: ALL updated (smooth simultaneous after fast EE lift)");
+      } else {
+        Serial.println("ERR: Invalid ALL format");
       }
     }
 
+    // === Disable ===
     else if (cmd.startsWith("Disable")) {
-      if (cmd.endsWith("All")) {
-        for (int i = 0; i < servoCount; i++) disableServo(i);
-      } else {
+      if (cmd.endsWith("All")) disableAllServos();
+      else {
         int id = cmd.substring(8).toInt();
         if (id >= 0 && id < servoCount) disableServo(id);
       }
     }
 
+    // === 개별 서보 ===
     else {
-      int space = cmd.indexOf(' ');
-      if (space > 0) {
-        int id = cmd.substring(0, space).toInt();
-        int ang = cmd.substring(space + 1).toInt();
-        if (id >= 0 && id < servoCount) {
-          enableServo(id);
-          setServoAngle(id, ang);
-        }
-      }
+      int id, ang;
+      if (sscanf(cmd.c_str(), "%d %d", &id, &ang) == 2 &&
+          id >= 0 && id < servoCount) {
+        enableServo(id);
+        setServoAngleSmooth(id, ang);
+        Serial.print("OK: Servo ");
+        Serial.print(id);
+        Serial.print(" → ");
+        Serial.println(ang);
+      } else Serial.println("ERR: Invalid command format");
     }
   }
 
-  if (millis() - lastSend > 500) {  // 0.1초마다 한 번
-    lastSend = millis();
+  // Timeout
+  if (millis() - lastCmdTime > CMD_TIMEOUT) {
+    disableAllServos();
+    Serial.println("Timeout → All servos disabled.");
+    lastCmdTime = millis();
+  }
+
+  // 상태 전송
+  if (millis() - lastStatusSend > 500) {
+    lastStatusSend = millis();
     Serial.print("@");
     for (int i = 0; i < servoCount; i++) {
       Serial.print(angles[i]);
       if (i < servoCount - 1) Serial.print(",");
     }
+    Serial.println();
   }
-  Serial.println();
-  delay(100);
+
+  delay(50);
 }
