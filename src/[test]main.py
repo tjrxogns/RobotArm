@@ -236,6 +236,29 @@
 
 
 
+def on_touchscreen_click(self, x, y, w, h):
+    self.apply_screen()
+    rel_x = x / max(w, 1)
+    rel_y = 1 - (y / max(h, 1))
+    tx = self.screenX0 + self.screenW * rel_x
+    ty = self.screenY0 + self.screenH * rel_y
+    tz = self.screenZ0
+
+    u, v, z = tx, ty, self.screenZ0
+    wx, wy, wz = self.robot.map_touch_to_world(u, v, z)
+    self.clicked_xy = (u, v)
+    self.lbl_click.setText(
+        f"터치 목표: ({u:.1f}, {v:.1f}, {z:.1f})"
+        f"    → EE 실제: ({wx:.1f}, {wy:.1f}, {wz:.1f})"
+    )
+
+    # ✅ inverse_kinematics() 결과를 joints에 반영
+    angles = self.robot.inverse_kinematics(wx, wy, wz)
+    if angles:
+        self.robot.joints = angles
+        self.robot.update_end_effector()
+
+    self.update_all()
 
 
 
